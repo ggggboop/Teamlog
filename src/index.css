@@ -1,0 +1,757 @@
+/* Apple 2026 Design System - Refined & Sensory */
+/* 외부 폰트(Google) 미사용: Electron/오프라인에서 네트워크·방화벽 팝업 방지 */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Warm, refined light theme with depth */
+    --background: 40 20% 98%;
+    --foreground: 220 20% 14%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 20% 14%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 20% 14%;
+
+    /* Accent RGB(2, 161, 192) — #02a1c0 */
+    --primary: 190 98% 38%;
+    --primary-foreground: 0 0% 100%;
+    --primary-glow: 190 75% 58%;
+
+    /* Warm neutrals */
+    --secondary: 220 16% 95%;
+    --secondary-foreground: 220 20% 30%;
+
+    --muted: 220 14% 94%;
+    --muted-foreground: 220 12% 50%;
+
+    --accent: 190 45% 96%;
+    --accent-foreground: 190 55% 30%;
+
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 0 0% 100%;
+
+    /* Urgency & Difficulty colors - unified red gradient */
+    --level-critical: 0 80% 55%;
+    --level-high: 15 70% 55%;
+    --level-medium: 30 60% 52%;
+    --level-low: 45 50% 50%;
+
+    /* Subtle success/info */
+    --success: 152 60% 48%;
+    --info: 190 98% 38%;
+    --warning: 35 95% 52%;
+
+    --border: 220 14% 90%;
+    --input: 220 14% 92%;
+    --ring: 190 98% 38%;
+
+    --radius: 1rem;
+
+    /* Sidebar - slight warmth */
+    --sidebar-background: 220 16% 99%;
+    --sidebar-foreground: 220 12% 45%;
+    --sidebar-primary: 190 98% 38%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 190 40% 96%;
+    --sidebar-accent-foreground: 190 50% 28%;
+    --sidebar-border: 220 14% 92%;
+    --sidebar-ring: 190 98% 38%;
+
+    /* Refined shadows with color tint */
+    --shadow-xs: 0 1px 2px 0 hsl(220 20% 20% / 0.04);
+    --shadow-sm: 0 2px 4px -1px hsl(220 20% 20% / 0.06), 0 1px 2px -1px hsl(220 20% 20% / 0.04);
+    --shadow-md: 0 6px 12px -2px hsl(220 20% 20% / 0.08), 0 3px 6px -3px hsl(220 20% 20% / 0.06);
+    --shadow-lg: 0 12px 24px -4px hsl(220 20% 20% / 0.10), 0 6px 12px -6px hsl(220 20% 20% / 0.08);
+    --shadow-xl: 0 24px 48px -8px hsl(220 20% 20% / 0.12), 0 12px 24px -12px hsl(220 20% 20% / 0.10);
+    --shadow-card: 0 2px 8px -2px hsl(220 20% 20% / 0.06), 0 8px 24px -4px hsl(220 20% 20% / 0.08);
+    --shadow-glow: 0 0 20px -5px hsl(var(--primary) / 0.25);
+
+    /* Glass effect */
+    --glass-bg: hsl(0 0% 100% / 0.7);
+    --glass-border: hsl(220 14% 90% / 0.5);
+  }
+
+  .dark {
+    --background: 222 20% 8%;
+    --foreground: 220 14% 96%;
+
+    --card: 222 18% 11%;
+    --card-foreground: 220 14% 96%;
+
+    --popover: 222 18% 11%;
+    --popover-foreground: 220 14% 96%;
+
+    --primary: 190 85% 55%;
+    --primary-foreground: 0 0% 100%;
+    --primary-glow: 190 75% 68%;
+
+    --secondary: 222 16% 16%;
+    --secondary-foreground: 220 14% 90%;
+
+    --muted: 222 14% 16%;
+    --muted-foreground: 220 12% 60%;
+
+    --accent: 190 45% 18%;
+    --accent-foreground: 190 90% 78%;
+
+    --destructive: 0 65% 55%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 222 14% 18%;
+    --input: 222 14% 18%;
+    --ring: 190 85% 55%;
+
+    --sidebar-background: 222 18% 10%;
+    --sidebar-foreground: 220 12% 60%;
+    --sidebar-primary: 190 85% 55%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 190 45% 18%;
+    --sidebar-accent-foreground: 190 90% 78%;
+    --sidebar-border: 222 14% 18%;
+    --sidebar-ring: 190 85% 55%;
+
+    --shadow-card: 0 2px 8px -2px hsl(0 0% 0% / 0.3), 0 8px 24px -4px hsl(0 0% 0% / 0.4);
+    --glass-bg: hsl(222 18% 11% / 0.7);
+    --glass-border: hsl(222 14% 20% / 0.5);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 16px; /* 본문·화면 안내 팝업과 동일 1rem 기준 */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    background-image: 
+      radial-gradient(ellipse 80% 50% at 50% -20%, hsl(var(--primary) / 0.03), transparent),
+      radial-gradient(ellipse 60% 40% at 100% 100%, hsl(var(--primary) / 0.02), transparent);
+  }
+
+  /* Refined scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / 0.2);
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.3);
+  }
+}
+
+@layer components {
+  /* Glass morphism cards */
+  .glass-card {
+    @apply bg-card/90 backdrop-blur-xl border border-border/60 rounded-2xl;
+    box-shadow: var(--shadow-card);
+  }
+
+  .glass-card-elevated {
+    @apply bg-card backdrop-blur-xl border border-border/40 rounded-2xl;
+    box-shadow: var(--shadow-lg);
+  }
+
+  .glass-sidebar {
+    @apply backdrop-blur-xl border-r border-sidebar-border/60;
+    background: linear-gradient(180deg, 
+      hsl(var(--sidebar-background)) 0%, 
+      hsl(var(--sidebar-background) / 0.98) 100%
+    );
+  }
+
+  /* Worklog (Variant) — 작성 화면 전용 셸 */
+  .worklog-app-shell {
+    @apply text-base leading-relaxed text-foreground antialiased;
+    background-color: #fafbfc;
+    background-image:
+      radial-gradient(circle at 15% 50%, rgba(2, 161, 192, 0.03), transparent 50%),
+      radial-gradient(circle at 85% 30%, rgba(2, 161, 192, 0.02), transparent 50%);
+  }
+
+  .worklog-sidebar-panel {
+    width: 288px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    background: rgba(255, 255, 255, 0.9);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-right: 1px solid rgba(0, 0, 0, 0.06);
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.03);
+    z-index: 10;
+  }
+
+  /* 작성자 사이드바: 좁은 높이에서 메뉴·캘린더 스크롤 */
+  .worklog-sidebar-scroll {
+    scrollbar-gutter: stable;
+  }
+
+  .worklog-sidebar-scroll::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .worklog-sidebar-scroll::-webkit-scrollbar-thumb {
+    background: rgba(15, 23, 42, 0.18);
+    border-radius: 9999px;
+  }
+
+  .worklog-sidebar-scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .worklog-main-surface {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    @apply text-base;
+  }
+
+  .worklog-btn-primary {
+    @apply inline-flex items-center justify-center gap-2 font-medium text-base text-white border-0 cursor-pointer transition-all duration-200;
+    padding: 0.625rem 1.25rem;
+    border-radius: 8px;
+    background: #02a1c0;
+    box-shadow: 0 4px 12px rgba(2, 161, 192, 0.2);
+  }
+
+  .worklog-btn-primary:hover:not(:disabled) {
+    background: #028ba6;
+    transform: translateY(-1px);
+  }
+
+  .worklog-btn-primary:disabled {
+    @apply opacity-50 cursor-not-allowed;
+    transform: none;
+  }
+
+  /** 툴바용 1차 버튼 — 높이 32px (호버 시 translate로 인접 요소와 겹침 방지) */
+  .worklog-btn-primary.worklog-btn-toolbar {
+    @apply h-8 min-h-8 gap-1.5 py-0 px-3 text-sm;
+    min-height: 2rem;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+
+  .worklog-btn-primary.worklog-btn-toolbar:hover:not(:disabled) {
+    transform: none;
+  }
+
+  .worklog-btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 font-medium text-base cursor-pointer transition-all duration-200 rounded-lg;
+    padding: 0.5rem 1rem;
+    color: #64748b;
+    background: rgba(255, 255, 255, 0.9);
+    border: 1px solid #e2e8f0;
+  }
+
+  .worklog-btn-secondary:hover {
+    background: #f1f5f9;
+    color: #1e293b;
+    border-color: #cbd5e1;
+  }
+
+  .worklog-day-card {
+    border-radius: 20px;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    background-color: #fff;
+    background-image: linear-gradient(135deg, #ffffff 0%, rgba(248, 250, 252, 0.96) 100%);
+    box-shadow:
+      0 4px 20px rgba(0, 0, 0, 0.06),
+      0 1px 3px rgba(0, 0, 0, 0.04);
+    overflow: hidden;
+  }
+
+  .worklog-team-selector-trigger {
+    @apply w-full flex items-center justify-between gap-3 cursor-pointer transition-all duration-200 text-left rounded-xl;
+    padding: 12px 16px;
+    background: #f8fafc;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+  }
+
+  .worklog-team-selector-trigger:hover {
+    border-color: #cbd5e1;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  }
+
+  .worklog-nav-item {
+    @apply flex items-center gap-3 px-4 py-3 rounded-xl text-base font-medium transition-all duration-200 no-underline;
+    color: #64748b;
+  }
+
+  .worklog-nav-item:hover {
+    background: rgba(2, 161, 192, 0.06);
+    color: #1e293b;
+  }
+
+  .worklog-nav-item-active {
+    background: rgba(2, 161, 192, 0.08);
+    color: #02a1c0;
+  }
+
+  .worklog-mini-calendar-wrap {
+    background: #f8fafc;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    border-radius: 12px;
+    padding: 12px;
+    margin-left: 12px;
+    margin-right: 12px;
+    margin-bottom: 12px;
+  }
+
+  .worklog-topbar {
+    height: 80px;
+    padding: 0 40px;
+    @apply flex items-center justify-between shrink-0 border-b;
+    border-color: rgba(0, 0, 0, 0.06);
+    background: rgba(255, 255, 255, 0.85);
+    backdrop-filter: blur(12px);
+  }
+
+  .worklog-content-scroll {
+    flex: 1;
+    overflow-y: auto;
+    padding: 32px 40px;
+    min-height: 0;
+  }
+
+  /* 관리자 대시보드 — 업무기록(worklog)과 동일 토큰 */
+  .worklog-admin-scope {
+    @apply text-base leading-relaxed;
+  }
+
+  .worklog-admin-tab {
+    @apply relative flex items-center gap-2 py-2 text-base font-medium transition-colors whitespace-nowrap;
+    color: #64748b;
+    background: none;
+    border: none;
+    cursor: pointer;
+  }
+
+  .worklog-admin-tab:hover {
+    color: #1e293b;
+  }
+
+  .worklog-admin-tab-active {
+    color: #1e293b;
+  }
+
+  .worklog-admin-tab-active::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 0;
+    width: 100%;
+    height: 2px;
+    background: #02a1c0;
+    border-radius: 2px 2px 0 0;
+    box-shadow: 0 -2px 8px rgba(2, 161, 192, 0.2);
+  }
+
+  .worklog-toolbar {
+    @apply flex flex-nowrap items-center justify-between gap-2 rounded-xl p-2 sm:p-3 min-w-0;
+    background: #f8fafc;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+  }
+
+  /** 관리자 탭 공통: [텍스트|도넛 등] → 월간|연간 → 연·월 — 한 줄(줄바꿈·가로 스크롤 없음) */
+  .worklog-period-strip {
+    @apply flex flex-nowrap items-center gap-1.5 min-w-0 flex-1;
+  }
+
+  /** 툴바 전용 연·월 셀렉트 — "2026년" 등이 잘리지 않도록 최소 폭 확보 (고해상도/윈도우 네이티브 셀렉트) */
+  .worklog-toolbar-select {
+    @apply rounded-md border border-[#e2e8f0] bg-white text-sm outline-none transition-all duration-200;
+    @apply h-8 w-auto shrink-0 py-0 pl-2 pr-8;
+    min-width: 6.25rem;
+    max-width: none;
+    color: #1e293b;
+    background-color: #fff;
+  }
+
+  .worklog-toolbar-select option {
+    color: #1e293b;
+    background-color: #fff;
+  }
+
+  .worklog-toolbar-select-month {
+    min-width: 3.5rem;
+    max-width: none;
+    @apply pl-2 pr-7;
+  }
+
+  .worklog-toolbar-select:focus,
+  .worklog-toolbar-select-month:focus {
+    border-color: #02a1c0;
+    box-shadow: 0 0 0 3px rgba(2, 161, 192, 0.1);
+  }
+
+  .worklog-admin-scope .section-card {
+    border-radius: 20px;
+    border-width: 1px;
+    border-color: rgba(0, 0, 0, 0.06);
+    background-color: #fff;
+    background-image: linear-gradient(135deg, #ffffff 0%, rgba(248, 250, 252, 0.96) 100%);
+    box-shadow:
+      0 4px 20px rgba(0, 0, 0, 0.06),
+      0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+
+  .worklog-admin-scope .section-header {
+    border-bottom-color: rgba(0, 0, 0, 0.06);
+    background: rgba(248, 250, 252, 0.55);
+    @apply py-3;
+  }
+
+  .worklog-admin-scope .stat-card {
+    border-radius: 20px;
+    border-width: 1px;
+    border-color: rgba(0, 0, 0, 0.06);
+    background-color: #fff;
+    background-image: linear-gradient(135deg, #ffffff 0%, rgba(248, 250, 252, 0.96) 100%);
+    box-shadow:
+      0 4px 20px rgba(0, 0, 0, 0.06),
+      0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+
+  .worklog-admin-scope .stat-card:hover {
+    transform: translateY(-1px);
+    box-shadow:
+      0 8px 24px rgba(0, 0, 0, 0.08),
+      0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+
+  .worklog-table-head {
+    @apply text-sm font-medium tracking-normal;
+    color: #64748b;
+    padding: 12px 24px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  }
+
+  .worklog-day-header {
+    @apply flex items-center justify-between;
+    padding: 16px 24px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  }
+
+  .worklog-form-control {
+    @apply w-full text-base rounded-lg outline-none transition-all duration-200;
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    color: #1e293b;
+    padding: 8px 12px;
+  }
+
+  .worklog-form-control:focus {
+    border-color: #02a1c0;
+    box-shadow: 0 0 0 3px rgba(2, 161, 192, 0.1);
+  }
+
+  /* Premium buttons */
+  .apple-button {
+    @apply inline-flex items-center justify-center rounded-xl px-5 py-2.5 text-base font-semibold;
+    @apply transition-all duration-300 ease-out;
+    @apply hover:scale-[1.02] active:scale-[0.98];
+    @apply focus:outline-none focus:ring-2 focus:ring-primary/40 focus:ring-offset-2 focus:ring-offset-background;
+  }
+
+  .apple-button-primary {
+    @apply apple-button bg-primary text-primary-foreground;
+    @apply hover:shadow-[var(--shadow-glow)];
+    background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--primary-glow)) 100%);
+  }
+
+  .apple-button-secondary {
+    @apply apple-button bg-secondary text-secondary-foreground;
+    @apply hover:bg-secondary/80;
+  }
+
+  .apple-button-ghost {
+    @apply apple-button bg-transparent text-foreground;
+    @apply hover:bg-muted;
+  }
+
+  /* Status badges with glow */
+  .status-badge {
+    @apply inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold;
+    @apply transition-all duration-200;
+  }
+
+  .status-badge-urgent {
+    @apply bg-urgent-high/10 text-urgent-high;
+  }
+
+  .status-badge-warning {
+    @apply bg-urgent-medium/10 text-urgent-medium;
+  }
+
+  .status-badge-success {
+    @apply bg-urgent-low/10 text-urgent-low;
+  }
+
+  /* Premium inputs */
+  .input-apple {
+    @apply w-full rounded-xl border border-input bg-background/80 px-4 py-2.5 text-base;
+    @apply transition-all duration-300 ease-out;
+    @apply focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary/50;
+    @apply focus:bg-background;
+    @apply placeholder:text-muted-foreground/60;
+    @apply hover:border-border/80;
+  }
+
+  /* Content cards with hover lift */
+  .content-card {
+    @apply bg-card rounded-2xl border-2 border-border p-5;
+    @apply transition-all duration-300 ease-out;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .content-card:hover {
+    @apply border-border;
+    box-shadow: var(--shadow-md);
+    transform: translateY(-1px);
+  }
+
+  /* Section cards */
+  .section-card {
+    @apply bg-card rounded-2xl border-2 border-border overflow-hidden;
+    box-shadow: var(--shadow-card);
+  }
+
+  .section-header {
+    @apply px-5 py-4 border-b border-border/50 bg-muted/20;
+  }
+
+  /* Week cells for calendar */
+  .week-cell {
+    @apply p-4 bg-card rounded-2xl border-2 border-border;
+    @apply transition-all duration-300 ease-out;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .week-cell:hover {
+    @apply border-primary/30;
+    box-shadow: var(--shadow-md);
+    transform: translateY(-2px);
+  }
+
+  .week-cell-today {
+    @apply border-primary/50 bg-primary/[0.02];
+    box-shadow: var(--shadow-md), 0 0 0 1px hsl(var(--primary) / 0.1);
+  }
+
+  .week-cell-weekend {
+    @apply bg-muted/40 border-2 border-border;
+  }
+
+  /* Data row styling */
+  .data-row {
+    @apply px-3 py-2 rounded-xl transition-all duration-200;
+    @apply hover:bg-muted/50;
+  }
+
+  .data-row-active {
+    @apply bg-primary/5 border border-primary/20;
+  }
+
+  /* Stat cards */
+  .stat-card {
+    @apply bg-card rounded-2xl border-2 border-border p-5;
+    @apply transition-all duration-300 ease-out;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .stat-card:hover {
+    box-shadow: var(--shadow-md);
+    transform: translateY(-2px);
+  }
+
+  .stat-card-icon {
+    @apply w-12 h-12 rounded-xl flex items-center justify-center;
+    @apply transition-transform duration-300;
+  }
+
+  .stat-card:hover .stat-card-icon {
+    transform: scale(1.05);
+  }
+
+  /* Navigation items */
+  .nav-item {
+    @apply flex items-center gap-3 px-4 py-3 rounded-xl;
+    @apply transition-all duration-200 ease-out;
+    @apply text-muted-foreground hover:text-foreground hover:bg-muted/60;
+  }
+
+  .nav-item-active {
+    @apply bg-primary/10 text-primary font-medium;
+    @apply hover:bg-primary/15;
+  }
+
+  /* Tabs */
+  .tab-group {
+    @apply flex gap-1 p-1.5 bg-muted/50 rounded-xl;
+  }
+
+  .tab-item {
+    @apply px-4 py-2 text-sm font-medium rounded-lg;
+    @apply transition-all duration-200 ease-out;
+    @apply text-muted-foreground hover:text-foreground;
+  }
+
+  .tab-item-active {
+    @apply bg-card text-foreground shadow-sm;
+  }
+
+  /* Progress bars */
+  .progress-bar {
+    @apply h-2 bg-secondary rounded-full overflow-hidden;
+  }
+
+  .progress-bar-fill {
+    @apply h-full rounded-full transition-all duration-500 ease-out;
+    background: linear-gradient(90deg, hsl(var(--primary)) 0%, hsl(var(--primary-glow)) 100%);
+  }
+
+  /* Tooltips */
+  .tooltip {
+    @apply px-3 py-1.5 bg-foreground text-background text-xs font-medium rounded-lg;
+    box-shadow: var(--shadow-lg);
+  }
+
+  /* Dividers */
+  .divider {
+    @apply h-px bg-gradient-to-r from-transparent via-border to-transparent;
+  }
+
+  /* Animated underline for links */
+  .link-underline {
+    @apply relative inline-block;
+  }
+
+  .link-underline::after {
+    @apply content-[''] absolute left-0 bottom-0 w-full h-0.5 bg-primary;
+    @apply origin-bottom-right transition-transform duration-300 ease-out;
+    transform: scaleX(0);
+  }
+
+  .link-underline:hover::after {
+    @apply origin-bottom-left;
+    transform: scaleX(1);
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  /* Gradient text */
+  .text-gradient {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--primary-glow)) 100%);
+  }
+
+  /* Animated gradient background */
+  .bg-gradient-animated {
+    background: linear-gradient(-45deg, 
+      hsl(var(--primary) / 0.1), 
+      hsl(var(--accent) / 0.1), 
+      hsl(var(--primary) / 0.05), 
+      hsl(var(--accent) / 0.05)
+    );
+    background-size: 400% 400%;
+    animation: gradient-shift 15s ease infinite;
+  }
+
+  @keyframes gradient-shift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+  }
+
+  /* Subtle shine effect */
+  .shine {
+    @apply relative overflow-hidden;
+  }
+
+  .shine::before {
+    @apply content-[''] absolute inset-0;
+    background: linear-gradient(
+      120deg,
+      transparent 30%,
+      hsl(0 0% 100% / 0.1) 50%,
+      transparent 70%
+    );
+    animation: shine 3s ease-in-out infinite;
+  }
+
+  @keyframes shine {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+  }
+
+  /* Hover lift */
+  .hover-lift {
+    @apply transition-all duration-300 ease-out;
+  }
+
+  .hover-lift:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+  }
+
+  /* Smooth focus ring */
+  .focus-ring {
+    @apply focus:outline-none focus:ring-2 focus:ring-primary/40 focus:ring-offset-2 focus:ring-offset-background;
+  }
+
+  /* Duration spinner - hide by default, show on focus */
+  .duration-spinner::-webkit-outer-spin-button,
+  .duration-spinner::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+
+  .duration-spinner:focus::-webkit-outer-spin-button,
+  .duration-spinner:focus::-webkit-inner-spin-button {
+    -webkit-appearance: inner-spin-button;
+    opacity: 1;
+    width: auto;
+    height: auto;
+    cursor: pointer;
+  }
+
+  .duration-spinner {
+    -moz-appearance: textfield;
+  }
+
+  .duration-spinner:focus {
+    -moz-appearance: auto;
+  }
+}

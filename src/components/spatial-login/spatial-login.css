@@ -1,0 +1,511 @@
+/* Spatial Lineage / Periodic Explorer — login hero (design tokens) */
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+@import '@fontsource/inter/700.css';
+
+.spatial-login-root {
+  --sl-bg-color: #f2f4f8;
+  --sl-text-main: #334155;
+  --sl-text-muted: #94a3b8;
+  /* 폼·강조 버튼 등 — 기존 푸른 계열 */
+  --sl-blue-main: #2d7df6;
+  --sl-blue-light: #4892fc;
+  --sl-blue-shadow: rgba(45, 125, 246, 0.38);
+  /* DK 노드 + 헤더 네모 아이콘 전용 RGB(2, 161, 192) */
+  --sl-dk-main: rgb(2, 161, 192);
+  --sl-dk-light: #3dd4e4;
+  --sl-dk-shadow: rgba(2, 161, 192, 0.4);
+  /* 결혼선(굵은 가로 블록)만 시안 톤 유지 */
+  --sl-marriage-tint: rgba(2, 161, 192, 0.16);
+  --sl-shadow-ambient: rgba(20, 35, 70, 0.04);
+  --sl-shadow-cast: rgba(20, 35, 70, 0.08);
+  --sl-shadow-deep: rgba(20, 35, 70, 0.12);
+  --sl-font-stack: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: var(--sl-font-stack);
+  background-color: var(--sl-bg-color);
+  background-image: radial-gradient(circle at 50% 0%, #ffffff 0%, var(--sl-bg-color) 80%);
+  color: var(--sl-text-main);
+}
+
+.spatial-login-root .sl-ui-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 40px;
+}
+
+.spatial-login-root .sl-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  pointer-events: auto;
+}
+
+.spatial-login-root .sl-btn {
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-family: var(--sl-font-stack);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--sl-text-main);
+  cursor: pointer;
+  box-shadow: 0 4px 12px var(--sl-shadow-ambient);
+  transition: all 0.2s ease;
+}
+
+.spatial-login-root .sl-btn:hover {
+  background: #fff;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px var(--sl-shadow-cast);
+}
+
+.spatial-login-root .sl-instructions {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--sl-text-muted);
+  text-align: center;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  pointer-events: auto;
+}
+
+.spatial-login-root .sl-viewport {
+  position: absolute;
+  inset: 0;
+  perspective: 2000px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  z-index: 0;
+  user-select: none;
+}
+
+.spatial-login-root .sl-camera {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+  transition: transform 0.1s cubic-bezier(0.2, 0, 0, 1);
+  transform: translateZ(-500px) rotateX(45deg) rotateZ(-15deg);
+}
+
+.spatial-login-root .sl-world {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  transform-style: preserve-3d;
+}
+
+.spatial-login-root .sl-connections-layer {
+  position: absolute;
+  top: -2000px;
+  left: -2000px;
+  width: 4000px;
+  height: 4000px;
+  pointer-events: none;
+  transform: translateZ(-1px);
+}
+
+.spatial-login-root .sl-link-path {
+  fill: none;
+  stroke: #e2e8f0;
+  stroke-width: 6;
+  stroke-linecap: round;
+  filter: drop-shadow(0px 4px 6px var(--sl-shadow-ambient));
+  transition: stroke 0.3s ease;
+}
+
+.spatial-login-root .sl-node-container {
+  position: absolute;
+  transform-style: preserve-3d;
+  transition:
+    filter 0.4s ease,
+    transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  will-change: transform, filter;
+}
+
+.spatial-login-root .sl-node {
+  position: absolute;
+  top: -40px;
+  left: -40px;
+  width: 80px;
+  height: 80px;
+  border-radius: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  cursor: pointer;
+  transform-style: preserve-3d;
+}
+
+.spatial-login-root .sl-node-white {
+  background: #ffffff;
+  box-shadow:
+    inset 2px 2px 4px rgba(255, 255, 255, 1),
+    inset -2px -4px 8px rgba(0, 0, 0, 0.02),
+    0px 4px 8px rgba(0, 0, 0, 0.04),
+    20px 30px 40px -10px var(--sl-shadow-cast),
+    0px 10px 20px var(--sl-shadow-ambient);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+}
+
+/*
+ * DK 노드 — 디자인 코드와 동일한 층위:
+ * ① 바깥: 그라데이션 + 인셋으로 테두리(링)에 깊이
+ * ② ::after: 안쪽 6px 단색 플랫 면 + 아래쪽만 짧은 그림자 → 테두리보다 한 겹 앞에 떠 있음
+ * ③ 글자: translateZ(20px)로 면 위로 살짝 전출(플랫 유지, 볼록 광택 없음)
+ */
+.spatial-login-root .sl-node-blue {
+  width: 100px;
+  height: 100px;
+  top: -50px;
+  left: -50px;
+  border-radius: 32px;
+  isolation: isolate;
+  background: linear-gradient(135deg, var(--sl-dk-light), var(--sl-dk-main));
+  box-shadow:
+    inset 2px 2px 6px rgba(255, 255, 255, 0.4),
+    inset -2px -6px 12px rgba(0, 0, 0, 0.15),
+    0px 10px 20px var(--sl-dk-shadow),
+    25px 40px 50px -10px var(--sl-shadow-deep);
+}
+
+.spatial-login-root .sl-node-blue::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  right: 6px;
+  bottom: 6px;
+  border-radius: 26px;
+  background: var(--sl-dk-main);
+  box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.1);
+  z-index: 0;
+}
+
+.spatial-login-root .sl-node-glass {
+  background: rgba(255, 255, 255, 0.5);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  box-shadow:
+    0 8px 32px 0 rgba(31, 38, 135, 0.05),
+    inset 2px 2px 5px rgba(255, 255, 255, 0.6);
+  border-radius: 16px;
+}
+
+.spatial-login-root .sl-node-glass.sl-bond-marriage {
+  background: var(--sl-marriage-tint);
+  border-color: rgba(255, 255, 255, 0.65);
+}
+
+.spatial-login-root .sl-node-content {
+  position: relative;
+  z-index: 2;
+  text-align: center;
+  transform: translateZ(20px);
+}
+
+.spatial-login-root .sl-node-blue .sl-node-content {
+  color: white;
+}
+
+.spatial-login-root .sl-avatar-initial {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.05em;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.spatial-login-root .sl-node-blue .sl-avatar-initial {
+  font-size: 28px;
+}
+
+/* DongKoo DK 로고(PNG 투명 배경 — 추가 박스/흰 배경 없음) */
+.spatial-login-root .sl-dk-logo-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 2px;
+  /* 노드(100px) 기준 약 5% 위로 + 이전 보정 반영 */
+  transform: translateY(-2.5px);
+}
+
+.spatial-login-root .sl-dk-logo {
+  /* 기존 대비 약 110% (48×0.8×1.1) */
+  width: 42.24px;
+  height: 42.24px;
+  object-fit: contain;
+  display: block;
+  pointer-events: none;
+  background: transparent;
+}
+
+.spatial-login-root .sl-node-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--sl-text-main);
+  white-space: nowrap;
+}
+
+.spatial-login-root .sl-node-blue .sl-node-name {
+  color: white;
+  font-size: 10px;
+  line-height: 1.25;
+  max-width: 92px;
+  white-space: normal;
+}
+
+/* DK: Teamlog 줄 제거 → 시작하기 강조 */
+.spatial-login-root .sl-node-blue .sl-node-name.sl-node-name--start {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 1.2;
+  max-width: 96px;
+  margin-top: 2px;
+}
+
+.spatial-login-root .sl-node-relation {
+  font-size: 9px;
+  font-weight: 500;
+  color: var(--sl-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-top: 2px;
+}
+
+.spatial-login-root .sl-node-blue .sl-node-relation {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.spatial-login-root .sl-node-container:hover {
+  transform: translateZ(40px) scale(1.05);
+  z-index: 100;
+}
+
+/* DK(수소) 컨테이너: 다른 원소보다 위 + 시작하기 클릭 */
+.spatial-login-root .sl-node-container--primary {
+  z-index: 500;
+  cursor: pointer;
+}
+.spatial-login-root .sl-node-container--primary:hover {
+  z-index: 5000;
+}
+
+.spatial-login-root .sl-node-container:hover .sl-node-white {
+  box-shadow:
+    inset 2px 2px 4px rgba(255, 255, 255, 1),
+    inset -2px -4px 8px rgba(0, 0, 0, 0.02),
+    0px 8px 16px rgba(0, 0, 0, 0.06),
+    30px 50px 60px -10px var(--sl-shadow-deep);
+}
+
+.spatial-login-root .sl-blur-light {
+  filter: blur(2px) opacity(0.8);
+}
+.spatial-login-root .sl-blur-medium {
+  filter: blur(4px) opacity(0.6);
+}
+.spatial-login-root .sl-blur-heavy {
+  filter: blur(8px) opacity(0.4);
+}
+.spatial-login-root .sl-focus {
+  filter: blur(0px) opacity(1);
+}
+
+.spatial-login-root .sl-meta-panel {
+  position: absolute;
+  /* 노드 하단 아래(겹치지 않음): white 80px → bottom 40px + 8px 간격 */
+  top: 48px;
+  left: 50%;
+  transform: translateX(-50%) translateZ(30px);
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(20px);
+  padding: 8px 12px;
+  border-radius: 12px;
+  box-shadow: 0 10px 24px var(--sl-shadow-cast);
+  border: 1px solid rgba(255, 255, 255, 1);
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 0.2s ease,
+    visibility 0.2s ease;
+  pointer-events: none;
+  white-space: nowrap;
+  display: flex;
+  gap: 12px;
+}
+
+/*
+ * DK 스택: 패널(min-width 200px)만 플로우 폭을 잡으면 노드 중심(컨테이너 원점)과 패널 중심이 어긋남.
+ * 스택 폭을 노드(100px)와 맞추고, 패널은 left:0 + translateX(-50%)로 노드와 같은 수직 중심선에 정렬.
+ */
+.spatial-login-root .sl-login-stack {
+  display: flex;
+  flex-direction: column;
+  /* center면 패널만 100px 스택 안에서 가로 중앙(50px)에 가서 노드 중심(0)과 어긋남 */
+  align-items: flex-start;
+  gap: 0;
+  position: relative;
+  width: 100px;
+  overflow: visible;
+  transform-style: preserve-3d;
+}
+
+.spatial-login-root .sl-login-stack > .sl-node {
+  flex-shrink: 0;
+}
+
+/* 시작하기 클릭 시 짧은 스케일 피드백 */
+@keyframes sl-dk-tap {
+  0% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+  40% {
+    transform: scale(0.94);
+    filter: brightness(1.06);
+  }
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+}
+
+.spatial-login-root .sl-login-stack.sl-dk-tap-fx .sl-node-blue {
+  animation: sl-dk-tap 0.38s cubic-bezier(0.34, 1.45, 0.64, 1);
+}
+
+.spatial-login-root .sl-node-container:hover .sl-meta-panel {
+  opacity: 1;
+  visibility: visible;
+}
+
+.spatial-login-root .sl-meta-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.spatial-login-root .sl-meta-label {
+  font-size: 8px;
+  text-transform: uppercase;
+  color: var(--sl-text-muted);
+  font-weight: 600;
+}
+
+.spatial-login-root .sl-meta-value {
+  font-size: 10px;
+  color: var(--sl-text-main);
+  font-weight: 500;
+}
+
+.spatial-login-root .sl-down-arrow {
+  width: 14px;
+  height: 14px;
+  background: currentColor;
+  clip-path: polygon(40% 0, 60% 0, 60% 50%, 100% 50%, 50% 100%, 0 50%, 40% 50%);
+  margin-top: 4px;
+}
+
+.spatial-login-root .sl-node-blue .sl-down-arrow {
+  color: white;
+}
+
+/* Login entrance + form cards */
+.sl-glass-card {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.95);
+  border-radius: 24px;
+  box-shadow:
+    0 4px 12px var(--sl-shadow-ambient),
+    0 24px 48px -12px var(--sl-shadow-cast);
+}
+
+.sl-login-primary-btn {
+  background: linear-gradient(135deg, var(--sl-blue-light), var(--sl-blue-main));
+  color: #fff;
+  font-weight: 600;
+  font-size: 15px;
+  padding: 14px 32px;
+  border-radius: 999px;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 8px 24px var(--sl-blue-shadow);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  width: 100%;
+  font-family: var(--sl-font-stack);
+}
+
+.sl-login-primary-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 28px var(--sl-blue-shadow);
+}
+
+.sl-login-primary-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.sl-hover-menu {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(6px);
+  transition: opacity 0.2s ease, transform 0.2s ease, visibility 0.2s;
+  pointer-events: none;
+}
+
+.sl-login-btn-wrap:hover .sl-hover-menu,
+.sl-login-btn-wrap:focus-within .sl-hover-menu {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.sl-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 14px;
+  border-radius: 14px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--sl-text-main);
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+  transition: background 0.15s ease;
+  font-family: var(--sl-font-stack);
+}
+
+.sl-menu-item:hover {
+  background: #fff;
+}
+
+.sl-menu-item.sl-menu-accent {
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+  color: var(--sl-blue-main);
+}
