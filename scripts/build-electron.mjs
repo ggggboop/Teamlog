@@ -3,13 +3,17 @@
  * package.json "type": "module" 환경에서 exports 충돌 방지
  */
 import * as esbuild from 'esbuild';
-import { mkdirSync, existsSync } from 'fs';
+import { mkdirSync, existsSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const outDir = join(root, 'dist-electron', 'electron');
+
+const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
+const packageVersion =
+  typeof pkg.version === 'string' && pkg.version.length > 0 ? pkg.version : '0.0.0';
 
 if (!existsSync(outDir)) {
   mkdirSync(outDir, { recursive: true });
@@ -28,6 +32,9 @@ await esbuild.build({
   bundle: true,
   external: ['electron', 'better-sqlite3'],
   sourcemap: false,
+  define: {
+    __TEAMLOG_PACKAGE_VERSION__: JSON.stringify(packageVersion),
+  },
 });
 
 // ElectronDatabaseAdapter는 main.ts에 번들됨 (같은 entryPoint)

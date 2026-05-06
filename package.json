@@ -1,7 +1,7 @@
 {
   "name": "vite_react_shadcn_ts",
   "private": true,
-  "version": "1.0.3",
+  "version": "1.0.4",
   "type": "module",
   "main": "dist-electron/electron/main.cjs",
   "scripts": {
@@ -11,8 +11,10 @@
     "build:electron": "vite build --mode electron",
     "build:main": "node scripts/build-electron.mjs",
     "electron:dev": "npm run build:electron && npm run build:main && electron .",
-    "electron:build": "npm run build:electron && npm run build:main && node scripts/generate-ico.cjs && electron-builder --config electron-builder.config.cjs --dir",
-    "electron:dist": "npm run build:electron && npm run build:main && node scripts/generate-ico.cjs && electron-builder --config electron-builder.config.cjs",
+    "icon:generate": "node scripts/generate-ico.cjs",
+    "icon:preview": "node scripts/preview-teamlog-icon.cjs",
+    "electron:build": "npm run build:electron && npm run build:main && electron-builder --config electron-builder.config.cjs --dir",
+    "electron:dist": "npm run build:electron && npm run build:main && electron-builder --config electron-builder.config.cjs",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
@@ -31,6 +33,7 @@
     ],
     "forceCodeSigning": false,
     "win": {
+      "icon": "Teamlog.ico",
       "target": [
         {
           "target": "nsis",

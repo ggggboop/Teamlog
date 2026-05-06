@@ -15,7 +15,7 @@ electron-dist-build
 # 임시 추출 등
 .asar-extract/
 release
-build/Teamlog.ico
+build/icon-preview/
 dist-ssr
 *.local
 

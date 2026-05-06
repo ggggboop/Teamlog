@@ -6,6 +6,7 @@ export interface ElectronPreloadApi {
   selectDbFile: () => Promise<string | null>;
   createNewDb: () => Promise<string | null>;
   initialize: () => Promise<unknown>;
+  getVersionGate: () => Promise<{ appVersion: string; minRequiredVersion: string | null; blocked: boolean }>;
   getConfig: () => Promise<unknown>;
   getAllMembers: () => Promise<unknown>;
   getTeams: () => Promise<unknown>;

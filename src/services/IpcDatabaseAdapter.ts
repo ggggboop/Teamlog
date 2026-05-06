@@ -13,6 +13,7 @@ declare global {
   interface Window {
     electron?: {
       initialize: () => Promise<void>;
+      getVersionGate: () => Promise<{ appVersion: string; minRequiredVersion: string | null; blocked: boolean }>;
       getConfig: () => Promise<DatabaseConfig>;
       getAllMembers: () => Promise<TeamMember[]>;
       getMemberById: (id: string) => Promise<TeamMember | null>;

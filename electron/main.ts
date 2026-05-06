@@ -4,6 +4,10 @@ import fs from 'fs';
 import { ElectronDatabaseAdapter } from './database/ElectronDatabaseAdapter';
 import type { Category, WorkLog, TeamMember, WorkTeam } from '../src/types/workLog';
 import type { SaveLogsBatchPayload } from '../src/services/DatabaseAdapter';
+import { MIN_REQUIRED_VERSION_SETTING_KEY } from '../src/constants/versionPolicy';
+import { versionLessThan } from '../src/utils/semverLite';
+
+declare const __TEAMLOG_PACKAGE_VERSION__: string | undefined;
 
 let mainWindow: BrowserWindow | null = null;
 let dbAdapter: ElectronDatabaseAdapter | null = null;
@@ -41,6 +45,34 @@ async function getAdapter(): Promise<ElectronDatabaseAdapter> {
   }
   return dbAdapter;
 }
+
+function resolveRuntimePackageVersion(): string {
+  try {
+    if (typeof __TEAMLOG_PACKAGE_VERSION__ === 'string' && __TEAMLOG_PACKAGE_VERSION__.length > 0) {
+      return __TEAMLOG_PACKAGE_VERSION__;
+    }
+  } catch {
+    /* 번들 define 없음 */
+  }
+  try {
+    const pkgPath = path.join(process.cwd(), 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as { version?: string };
+    if (typeof pkg.version === 'string' && pkg.version.length > 0) return pkg.version;
+  } catch {
+    /* ignore */
+  }
+  return '0.0.0';
+}
+
+const TEAMLOG_RUNTIME_PACKAGE_VERSION = resolveRuntimePackageVersion();
+
+try {
+  (globalThis as typeof globalThis & { TEAMLOG_APP_PACKAGE_VERSION?: string }).TEAMLOG_APP_PACKAGE_VERSION =
+    TEAMLOG_RUNTIME_PACKAGE_VERSION;
+} catch {
+  /* ignore */
+}
+console.log('[Teamlog] 패키지 버전 (package.json):', TEAMLOG_RUNTIME_PACKAGE_VERSION);
 
 // DB 경로 관련 IPC
 ipcMain.handle('db:getDbPath', () => loadSavedDbPath());
@@ -86,6 +118,28 @@ ipcMain.handle('db:createNewDb', async () => {
 });
 
 // DataService IPC 핸들러
+/** DB 초기화 후 최소 요구 버전과 비교 (DB 미연결 시 차단하지 않음) */
+ipcMain.handle('app:getVersionGate', async () => {
+  try {
+    const adapter = await getAdapter();
+    const raw = await adapter.getSetting(MIN_REQUIRED_VERSION_SETTING_KEY);
+    const minTrim = (raw ?? '').trim();
+    const blocked = Boolean(minTrim) && versionLessThan(TEAMLOG_RUNTIME_PACKAGE_VERSION, minTrim);
+    return {
+      appVersion: TEAMLOG_RUNTIME_PACKAGE_VERSION,
+      minRequiredVersion: minTrim.length > 0 ? minTrim : null,
+      blocked,
+    };
+  } catch (e) {
+    console.error('[Teamlog] app:getVersionGate 실패:', e instanceof Error ? e.message : String(e));
+    return {
+      appVersion: TEAMLOG_RUNTIME_PACKAGE_VERSION,
+      minRequiredVersion: null,
+      blocked: false,
+    };
+  }
+});
+
 ipcMain.handle('db:initialize', async () => {
   const adapter = await getAdapter();
   await adapter.initialize();

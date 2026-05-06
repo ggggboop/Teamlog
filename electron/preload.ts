@@ -5,6 +5,7 @@ const electronAPI = {
   selectDbFile: () => ipcRenderer.invoke('db:selectDbFile'),
   createNewDb: () => ipcRenderer.invoke('db:createNewDb'),
   initialize: () => ipcRenderer.invoke('db:initialize'),
+  getVersionGate: () => ipcRenderer.invoke('app:getVersionGate'),
   getConfig: () => ipcRenderer.invoke('db:getConfig'),
   getAllMembers: () => ipcRenderer.invoke('db:getAllMembers'),
   getTeams: () => ipcRenderer.invoke('db:getTeams'),

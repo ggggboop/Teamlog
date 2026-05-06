@@ -1,5 +1,5 @@
 /**
- * build/teamlog-source.png → 다중 크기 PNG(알파 유지) → build/Teamlog.ico
+ * build/teamlog-source.png → 다중 크기 PNG(알파 유지) → 루트 Teamlog.ico (패키징·rcedit 이 파일 참조)
  *
  * png-to-ico 는 BMP DIB + AND 마스크로 조립해, 투명·반투명이 탐색기/작업 표시줄에서 검게 보이는 경우가 많음.
  * Windows Vista+ 는 ICO 안에 PNG 를 그대로 넣는 형식을 지원하므로, Sharp PNG 버퍼만 ICONDIR 로 묶음.
@@ -51,11 +51,32 @@ function buildIcoWithEmbeddedPngs(pngBuffers) {
   return Buffer.concat(parts);
 }
 
+/**
+ * 알파 0 인데 RGB 만 남은 픽셀(부적절한 잔상)만 정리한다.
+ * 반투명 픽셀의 알파를 255 로 강제하면 RGB 가 검정(안티앨리어스 흔적)인 채 불투명해져
+ * 브라우저 미리보기·아이콘 테두리가 검은 링으로 보이므로 여기서는 스냅하지 않는다.
+ */
+async function clearRgbWhereFullyTransparent(sharpMod, pngBuffer) {
+  const { data, info } = await sharpMod(pngBuffer).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const w = info.width;
+  const h = info.height;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] === 0) {
+      data[i] = 0;
+      data[i + 1] = 0;
+      data[i + 2] = 0;
+    }
+  }
+  return sharpMod(data, { raw: { width: w, height: h, channels: 4 } })
+    .png({ compressionLevel: 9, adaptiveFiltering: true, force: true })
+    .toBuffer();
+}
+
 async function main() {
   const sharp = require('sharp');
   const root = path.join(__dirname, '..');
   const sourcePath = path.join(root, 'build', 'teamlog-source.png');
-  const icoPath = path.join(root, 'build', 'Teamlog.ico');
+  const icoPath = path.join(root, 'Teamlog.ico');
 
   if (!fs.existsSync(sourcePath)) {
     console.error('Missing:', sourcePath);
@@ -64,7 +85,7 @@ async function main() {
 
   const transparent = { r: 0, g: 0, b: 0, alpha: 0 };
 
-  const pngBuffers = await Promise.all(
+  const pngBuffersRaw = await Promise.all(
     ICO_SIZES.map((size) =>
       sharp(sourcePath)
         .ensureAlpha()
@@ -77,6 +98,8 @@ async function main() {
         .toBuffer()
     )
   );
+
+  const pngBuffers = await Promise.all(pngBuffersRaw.map((buf) => clearRgbWhereFullyTransparent(sharp, buf)));
 
   const buf = buildIcoWithEmbeddedPngs(pngBuffers);
   fs.writeFileSync(icoPath, buf);

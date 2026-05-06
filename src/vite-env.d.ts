@@ -1,10 +1,20 @@
 /// <reference types="vite/client" />
 
+interface ImportMetaEnv {
+  readonly VITE_APP_PACKAGE_VERSION: string;
+}
+
 interface ElectronAPI {
   getDbPath: () => Promise<string | null>;
   selectDbFile: () => Promise<string | null>;
   createNewDb: () => Promise<string | null>;
   initialize: () => Promise<void>;
+  /** package.json 버전 대비 DB `min_required_version` 차단 여부 */
+  getVersionGate: () => Promise<{
+    appVersion: string;
+    minRequiredVersion: string | null;
+    blocked: boolean;
+  }>;
   getConfig: () => Promise<{ dbPath?: string; isConnected: boolean; adapterType: string }>;
   getAllMembers: () => Promise<import('@/types/workLog').TeamMember[]>;
   getMemberById: (id: string) => Promise<import('@/types/workLog').TeamMember | null>;

@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Trash2, Plus, Shield, Users, UserCog, Calendar, FileText, AlertTriangle } from 'lucide-react';
+import { Trash2, Plus, Shield, ShieldAlert, Users, UserCog, Calendar, FileText, AlertTriangle } from 'lucide-react';
 import { toast } from 'sonner';
 import { WorkTeam } from '@/types/workLog';
 import type {
@@ -12,6 +12,9 @@ import { Button } from '@/components/ui/button';
 import { PasswordInputWithToggle } from '@/components/PasswordInputWithToggle';
 import { loadMasterPanelPasswordCache, mergeMasterPanelPasswordCache } from '@/utils/masterPanelPasswordCache';
 import { cn } from '@/lib/utils';
+import { dataService } from '@/services/DataService';
+import { MIN_REQUIRED_VERSION_SETTING_KEY } from '@/constants/versionPolicy';
+import { APP_VERSION } from '@/constants/appVersion';
 
 interface TeamDraft {
   id: string;
@@ -160,6 +163,9 @@ export function MasterTeamSettingsPanel({
   const [showDataResetConfirm, setShowDataResetConfirm] = useState(false);
   /** 입력란 표시용 평문(서버는 해시만 보관). 저장 시 localStorage에도 넣어 재로그인 후에도 복원합니다. */
   const [committedPlainByRow, setCommittedPlainByRow] = useState<Record<string, string>>({});
+  /** DB `min_required_version` — 이 버전 미만 클라이언트는 다음 실행부터 차단 */
+  const [minRequiredVersionInput, setMinRequiredVersionInput] = useState('');
+  const [minReqSaving, setMinReqSaving] = useState(false);
 
   const globalPreviewKey = useMemo(
     () =>
@@ -215,6 +221,21 @@ export function MasterTeamSettingsPanel({
   useEffect(() => {
     setWorkRecordStartInput(workRecordStartDate ?? '');
   }, [workRecordStartDate]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const raw = await dataService.getSetting(MIN_REQUIRED_VERSION_SETTING_KEY);
+        if (!cancelled) setMinRequiredVersionInput((raw ?? '').trim());
+      } catch {
+        if (!cancelled) setMinRequiredVersionInput('');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const nextSortOrder = useMemo(() => {
     if (teamDrafts.length === 0) return 1;
@@ -556,6 +577,63 @@ export function MasterTeamSettingsPanel({
           <p className="text-[11px] text-[#94a3b8]">
             예: 2026-04-02로 두면 4월 1일 및 이전에는 업무 기록만 막힙니다.
           </p>
+        </section>
+
+        <section className="worklog-day-card flex flex-col p-5 space-y-4">
+          <div>
+            <h3 className="text-sm font-semibold flex items-center gap-2 text-[#1e293b]">
+              <ShieldAlert className="w-5 h-5 text-primary shrink-0" />
+              필수 클라이언트 버전
+            </h3>
+            <p className="text-xs text-[#64748b] mt-1.5 leading-relaxed">
+              공유 DB에 연결되는 <strong className="text-foreground">Electron 앱(package.json 버전)</strong>이 여기 적은
+              버전보다 낮으면 다음 실행부터 로그인·업무 화면이 열리지 않습니다. IPC·무결성 정책 변경 시 마스터가 올린 최소 버전보다 오래된
+              설치본을 차단합니다. 비우면 제한 없음.
+            </p>
+            <p className="text-[11px] text-[#94a3b8] mt-2">
+              이 설치본 표시 버전: <span className="font-mono text-foreground">{APP_VERSION}</span>
+            </p>
+            <p className="text-xs text-amber-900/90 mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 leading-relaxed dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+              <strong>주의:</strong> 현재 설치본({APP_VERSION})보다 높은 최소 버전을 저장하면 이 PC에서도 앱이 시작되지 않을 수
+              있습니다. 실수한 경우 DB의 <code className="font-mono text-[11px]">app_settings</code>에서 키{' '}
+              <code className="font-mono text-[11px]">{MIN_REQUIRED_VERSION_SETTING_KEY}</code> 값을 비우거나 낮춘 뒤 다시
+              시도하세요.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              placeholder="예: 1.0.4"
+              value={minRequiredVersionInput}
+              onChange={(e) => setMinRequiredVersionInput(e.target.value)}
+              className="h-10 max-w-[200px] rounded-xl border-black/[0.08] text-base font-mono bg-white"
+              autoComplete="off"
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="rounded-xl"
+              disabled={minReqSaving}
+              onClick={async () => {
+                setMinReqSaving(true);
+                try {
+                  const trimmed = minRequiredVersionInput.trim();
+                  await dataService.setSetting(MIN_REQUIRED_VERSION_SETTING_KEY, trimmed);
+                  toast.success(
+                    trimmed.length > 0
+                      ? `최소 버전 ${trimmed} 저장됨 (이 버전 미만 앱 차단)`
+                      : '최소 버전 요구를 해제했습니다.'
+                  );
+                } catch (e) {
+                  toast.error(e instanceof Error ? e.message : '저장에 실패했습니다.');
+                } finally {
+                  setMinReqSaving(false);
+                }
+              }}
+            >
+              {minReqSaving ? '저장 중…' : '저장'}
+            </Button>
+          </div>
         </section>
 
         <section className="worklog-day-card flex flex-col p-5 space-y-4 min-w-0">

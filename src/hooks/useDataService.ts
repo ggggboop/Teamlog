@@ -231,6 +231,7 @@ export function useDataService(selectedTeamId: string | null) {
     const autoCompletedLinked: { id: string; date: string; taskCode: string }[] = [];
     for (const orig of logs) {
       if (deletedSet.has(orig.id)) continue;
+      if (orig.memberId !== requesterMemberId) continue;
       if (orig.status !== '진행중' || !orig.taskCode) continue;
       const key = `${orig.memberId}\t${orig.taskCode}`;
       if (!taskCompletedKeys.has(key)) continue;
