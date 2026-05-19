@@ -31,7 +31,7 @@ interface LoginScreenProps {
   verifyTeamAdmin: (teamId: string, loginId: string, password: string) => Promise<boolean>;
   verifyMasterLogin: (loginId: string, password: string) => Promise<boolean>;
   onWriterComplete: (member: TeamMember) => void;
-  onAdminComplete: (payload: { teamId: string; role: Extract<StoredSessionRole, 'admin' | 'master'> }) => void;
+  onAdminComplete: (payload: { teamId: string; role: Extract<StoredSessionRole, 'admin' | 'director' | 'master'> }) => void;
 }
 
 const norm = (s: string | null | undefined) => (s ?? '').trim();
@@ -60,6 +60,31 @@ export function LoginScreen({
   const [pendingAdmin, setPendingAdmin] = useState<PendingAdmin | null>(null);
   const [busy, setBusy] = useState(false);
   const [dbPathDialogOpen, setDbPathDialogOpen] = useState(false);
+  const [dbAuthDialogOpen, setDbAuthDialogOpen] = useState(false);
+  const [dbAuthId, setDbAuthId] = useState('');
+  const [dbAuthPassword, setDbAuthPassword] = useState('');
+  const [dbAuthBusy, setDbAuthBusy] = useState(false);
+
+  const handleDbAuthSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!dbAuthId.trim()) return toast.error('사번을 입력해주세요.');
+    setDbAuthBusy(true);
+    try {
+      await initializeDataService();
+      const ok = await verifyMasterLogin(dbAuthId, dbAuthPassword);
+      if (ok) {
+        setDbAuthDialogOpen(false);
+        setDbPathDialogOpen(true);
+        setDbAuthPassword('');
+      } else {
+        toast.error('마스터 권한이 없습니다.');
+      }
+    } catch (err) {
+      toast.error('오류가 발생했습니다.');
+    } finally {
+      setDbAuthBusy(false);
+    }
+  };
 
   useEffect(() => {
     setPassword('');
@@ -86,12 +111,8 @@ export function LoginScreen({
           return;
         }
         const firstTeamId = teams.find((t) => t.id !== GLOBAL_TEAM_ADMIN_SCOPE_ID)?.id;
-        if (!firstTeamId) {
-          toast.error('등록된 팀이 없습니다. 마스터 메뉴에서 팀을 먼저 만드세요.');
-          return;
-        }
         setLastLoginEmployee(id);
-        onAdminComplete({ teamId: firstTeamId, role: 'master' });
+        onAdminComplete({ teamId: firstTeamId || GLOBAL_TEAM_ADMIN_SCOPE_ID, role: 'master' });
         return;
       }
 
@@ -127,6 +148,8 @@ export function LoginScreen({
       }
 
       toast.error('등록되지 않은 사번입니다.');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '오류가 발생했습니다.');
     } finally {
       setBusy(false);
     }
@@ -150,12 +173,8 @@ export function LoginScreen({
           return;
         }
         const firstTeamId = teams.find((t) => t.id !== GLOBAL_TEAM_ADMIN_SCOPE_ID)?.id;
-        if (!firstTeamId) {
-          toast.error('등록된 팀이 없습니다. 마스터 메뉴에서 팀을 먼저 만드세요.');
-          return;
-        }
         setLastLoginEmployee(id);
-        onAdminComplete({ teamId: firstTeamId, role: 'master' });
+        onAdminComplete({ teamId: firstTeamId || GLOBAL_TEAM_ADMIN_SCOPE_ID, role: 'master' });
         return;
       }
 
@@ -165,8 +184,9 @@ export function LoginScreen({
           toast.error('비밀번호가 맞지 않습니다.');
           return;
         }
+        const firstTeamId = teams.find((t) => t.id !== GLOBAL_TEAM_ADMIN_SCOPE_ID)?.id;
         setLastLoginEmployee(id);
-        onAdminComplete({ teamId: GLOBAL_TEAM_ADMIN_SCOPE_ID, role: 'admin' });
+        onAdminComplete({ teamId: firstTeamId || GLOBAL_TEAM_ADMIN_SCOPE_ID, role: 'director' });
         return;
       }
 
@@ -177,6 +197,8 @@ export function LoginScreen({
       }
       setLastLoginEmployee(id);
       onAdminComplete({ teamId: pendingAdmin.teamId, role: 'admin' });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '오류가 발생했습니다.');
     } finally {
       setBusy(false);
     }
@@ -254,12 +276,12 @@ export function LoginScreen({
         <div className="sl-ui-layer">
           <header className="sl-header">
             <TeamlogBrand className="mb-0" />
-            <button type="button" className="sl-btn" onClick={() => setDbPathDialogOpen(true)}>
-              DB 경로 설정
+            <button type="button" className="sl-btn" onClick={() => setDbAuthDialogOpen(true)}>
+              PostgreSQL 연결 설정
             </button>
           </header>
           <div className="sl-instructions">
-            DK에 마우스를 올려 로그인 · 최초 설치 시, DB 경로를 먼저 설정하세요.
+            DK에 마우스를 올려 로그인 · 최초 설치 시 PostgreSQL 연결을 먼저 설정하세요.
           </div>
         </div>
       </div>
@@ -315,6 +337,70 @@ export function LoginScreen({
         </>
       )}
 
+      {dbAuthDialogOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-[1100] bg-transparent"
+            aria-hidden
+            onClick={() => setDbAuthDialogOpen(false)}
+          />
+          <div
+            className={cn(
+              'fixed left-1/2 top-1/2 z-[1110] w-[min(calc(100vw-1.75rem),380px)]',
+              '-translate-x-1/2 -translate-y-1/2 md:left-[75%] overflow-hidden rounded-2xl border border-slate-200/90 bg-white',
+              'shadow-[0_24px_64px_-16px_rgba(15,23,42,0.18),0_8px_24px_-8px_rgba(15,23,42,0.08)]',
+              'animate-in fade-in slide-in-from-right-12 duration-300 ease-out'
+            )}
+            role="dialog"
+            aria-modal="true"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-slate-100 bg-slate-50/90 px-4 py-3">
+              <h2 className="text-[15px] font-semibold tracking-tight text-slate-800">
+                연결 설정 접근 권한 확인
+              </h2>
+              <button
+                type="button"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-200/80 hover:text-slate-900"
+                onClick={() => setDbAuthDialogOpen(false)}
+              >
+                <X className="h-4 w-4" strokeWidth={2.25} />
+              </button>
+            </div>
+            <div className="px-5 pb-6 pt-5">
+              <form onSubmit={handleDbAuthSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">마스터 로그인 ID</label>
+                  <input
+                    type="text"
+                    value={dbAuthId}
+                    onChange={(e) => setDbAuthId(e.target.value)}
+                    placeholder="사번 입력"
+                    className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm ring-offset-white file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">비밀번호</label>
+                  <input
+                    type="password"
+                    value={dbAuthPassword}
+                    onChange={(e) => setDbAuthPassword(e.target.value)}
+                    className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm ring-offset-white file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={dbAuthBusy}
+                  className="w-full inline-flex h-10 items-center justify-center rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-slate-50 hover:bg-slate-900/90 disabled:opacity-50"
+                >
+                  {dbAuthBusy ? '확인 중...' : '확인'}
+                </button>
+              </form>
+            </div>
+          </div>
+        </>
+      )}
+
       {dbPathDialogOpen && (
         <>
           <div
@@ -336,7 +422,7 @@ export function LoginScreen({
           >
             <div className="flex items-center justify-between gap-3 border-b border-slate-100 bg-slate-50/90 px-4 py-3">
               <h2 id="db-path-popup-title" className="text-[15px] font-semibold tracking-tight text-slate-800">
-                DB 경로 설정
+                PostgreSQL 연결 설정
               </h2>
               <button
                 type="button"

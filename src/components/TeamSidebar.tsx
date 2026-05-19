@@ -190,13 +190,19 @@ export function TeamSidebar({
     Boolean(selectedTeamId) &&
     teamHasAnyProfilePing(profileBaseline, members);
 
-  const memberBubbleWithPing = (m: TeamMember | null, size: 'sm' | 'md'): ReactNode => (
+  const memberBubbleWithPing = (m: TeamMember | null, size: 'sm' | 'md', teamAlert?: boolean): ReactNode => (
     <div className="relative shrink-0 self-start">
       <MemberEmojiBubble member={m} size={size} />
       {m && showMemberProfilePing(m) ? (
         <span
-          className="pointer-events-none absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-amber-400 ring-2 ring-white shadow-sm"
+          className="pointer-events-none absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-amber-400 ring-2 ring-white shadow-sm z-[1]"
           title="프로필이 바뀌었습니다"
+          aria-hidden
+        />
+      ) : teamAlert ? (
+        <span
+          className="pointer-events-none absolute -left-0.5 -top-0.5 h-2 w-2 rounded-full bg-amber-400 ring-2 ring-white shadow-sm z-[1] animate-pulse"
+          title="팀원 프로필이 변경되었습니다. 목록을 열어 확인해 주세요."
           aria-hidden
         />
       ) : null}
@@ -374,7 +380,10 @@ export function TeamSidebar({
             {members.length > 0 ? ` · ${members.length}명` : ''}
           </p>
           {sessionRole === 'master' && (
-            <p className="mt-1.5 pl-1 text-[10px] font-medium text-primary">마스터 관리자 세션</p>
+            <p className="mt-1.5 pl-1 text-[10px] font-medium text-primary">Master 세션</p>
+          )}
+          {sessionRole === 'director' && (
+            <p className="mt-1.5 pl-1 text-[10px] font-medium text-primary">Director 세션</p>
           )}
         </div>
 
@@ -557,13 +566,6 @@ export function TeamSidebar({
           open={memberPickerOpen}
           onOpenChange={(open) => {
             setMemberPickerOpen(open);
-            if (open && selectedTeamId && members.length > 0) {
-              const base = readProfileBaseline(selectedTeamId);
-              if (Object.keys(base).length === 0) {
-                mergeProfileBaselineWithMembers(selectedTeamId, members);
-                setProfileBaselineTick((t) => t + 1);
-              }
-            }
             if (!open && selectedTeamId) {
               mergeProfileBaselineWithMembers(selectedTeamId, members);
               setProfileBaselineTick((t) => t + 1);
@@ -573,17 +575,10 @@ export function TeamSidebar({
           <PopoverTrigger asChild>
             <button type="button" className="worklog-team-selector-trigger relative">
               <div className="flex min-w-0 flex-1 items-start gap-3">
-                {memberBubbleWithPing(selectedMember, 'md')}
+                {memberBubbleWithPing(selectedMember, 'md', showTeamProfileAlertDot)}
                 {memberTitleBlock(selectedMember, null)}
               </div>
               <ChevronDown className="h-4 w-4 shrink-0 text-[#64748b]" />
-              {showTeamProfileAlertDot ? (
-                <span
-                  className="pointer-events-none absolute right-11 top-3 h-2 w-2 rounded-full bg-red-500 ring-2 ring-white shadow-sm z-[1]"
-                  title="팀원 프로필이 변경되었습니다. 목록을 열어 확인해 주세요."
-                  aria-hidden
-                />
-              ) : null}
             </button>
           </PopoverTrigger>
           <PopoverContent

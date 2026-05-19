@@ -14,7 +14,7 @@ interface SettingsDialogProps {
 /**
  * 환경 설정 다이얼로그
  * 
- * ⚠️ DB 경로 선택 기능은 Electron 환경에서만 동작합니다.
+ * ⚠️ PostgreSQL 연결 설정은 Electron 환경에서만 동작합니다.
  * ⚠️ 웹 미리보기에서는 버튼이 비활성화됩니다.
  */
 export function SettingsDialog({ trigger }: SettingsDialogProps) {
@@ -74,6 +74,11 @@ export function SettingsDialog({ trigger }: SettingsDialogProps) {
                       <span className="h-2 w-2 rounded-full bg-primary" />
                       In-Memory (웹)
                     </>
+                  ) : config.adapterType === 'postgresql' ? (
+                    <>
+                      <span className="h-2 w-2 rounded-full bg-green-500" />
+                      PostgreSQL
+                    </>
                   ) : (
                     <>
                       <span className="h-2 w-2 rounded-full bg-green-500" />
@@ -101,7 +106,7 @@ export function SettingsDialog({ trigger }: SettingsDialogProps) {
               </div>
 
               <div className="flex items-center justify-between">
-                <span className="text-base text-muted-foreground">DB 경로</span>
+                <span className="text-base text-muted-foreground">연결 요약</span>
                 <span className="text-base font-medium text-right max-w-[200px] truncate">
                   {isElectron && dbPath ? dbPath : '(설정 안됨)'}
                 </span>

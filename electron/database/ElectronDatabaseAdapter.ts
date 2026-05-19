@@ -1,16 +1,12 @@
 /**
- * ElectronDatabaseAdapter - Main process 전용 SQLite 어댑터
- * 공유 폴더 DB 파일 지원 (네트워크 경로 포함)
+ * ElectronDatabaseAdapter — Electron 메인 프로세스 전용 PostgreSQL 어댑터 (node-pg Pool)
  *
- * WAL 모드 확인: DB 파일과 같은 폴더에 .db-wal, .db-shm 파일이 생성되면 WAL 활성화됨.
- * (공유 폴더/네트워크 드라이브에서는 WAL이 실패할 수 있어 DELETE 모드로 자동 전환)
+ * 연결 정보: PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE (또는 PG_* 별칭) 및
+ * userData/settings.json 의 `pg` 객체. settings.json 값이 있으면 해당 키로 환경 변수를 덮어씁니다.
  */
 
-import Database from 'better-sqlite3';
-import path from 'path';
-import fs from 'fs';
+import { Pool, type PoolClient } from 'pg';
 import crypto from 'crypto';
-import { app } from 'electron';
 import { TeamMember, WorkLog, Category, WorkTeam } from '../../src/types/workLog';
 import { generateSampleData } from '../../src/data/sampleData';
 import { QA_CATEGORIES_FLAT } from '../../src/data/qaCategories';
@@ -26,38 +22,54 @@ import {
 } from '../../src/utils/adminExtraAccounts';
 import { shouldPreserveImportedTeamAdmin } from '../../src/utils/preserveTeamAdminOnImport';
 import type { SaveLogsBatchPayload } from '../../src/services/DatabaseAdapter';
+import type { DatabaseConfig } from '../../src/services/DatabaseAdapter';
 import {
   clampCountForImport,
   clampDurationForImport,
   normalizeCountForStorage,
   normalizeDurationForStorage,
 } from '../../src/utils/workLogNumeric';
+import { hashTeamlogPassword } from './pgAuthUtils';
+import {
+  mergePgConnectionFromDiskAndEnv,
+  formatPgConnectionError,
+  testPgConnectionRaw,
+  type PgConnectionConfig,
+} from './pgSettingsStorage';
 
-/** YYYY-MM-DD 10자리 포맷 강제 (저장/비교 표준) */
+export type { PgConnectionConfig } from './pgSettingsStorage';
+
+type SqlExecutor = Pool | PoolClient;
+
 function ensureDateYYYYMMDD(value: string): string {
   const m = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (m) return `${m[1]}-${m[2]}-${m[3]}`;
   return value.slice(0, 10);
 }
 
-const PWD_SALT = 'teamlog';
-
-function hashPassword(pw: string): string {
-  return crypto.createHash('sha256').update(pw + PWD_SALT, 'utf8').digest('hex');
+/** IPC/UI 표시용 (비밀번호 제외) */
+export function getPgConnectionSummary(): string {
+  const c = mergePgConnectionFromDiskAndEnv();
+  return `${c.user}@${c.host}:${c.port}/${c.database}`;
 }
 
+/** 최종 PostgreSQL 스키마 (SQLite 마이그레이션은 앱 내 export/import 로 이행) */
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
-    updated_at TEXT DEFAULT (datetime('now'))
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS teams (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
+    department TEXT,
     sort_order INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    admin_login_id TEXT,
+    admin_password_hash TEXT,
+    admin_extra_json JSONB
 );
 CREATE INDEX IF NOT EXISTS idx_teams_sort ON teams(sort_order);
 
@@ -69,26 +81,26 @@ CREATE TABLE IF NOT EXISTS members (
     status_message TEXT,
     employee_no TEXT,
     team_id TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE SET NULL
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT fk_members_team FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS work_logs (
     id TEXT PRIMARY KEY,
     member_id TEXT NOT NULL,
-    date TEXT NOT NULL,
+    date DATE NOT NULL,
     category TEXT NOT NULL,
     content TEXT NOT NULL,
     issues TEXT,
-    duration REAL NOT NULL CHECK (duration >= 0),
+    duration DOUBLE PRECISION NOT NULL CHECK (duration >= 0),
     count INTEGER NOT NULL DEFAULT 1 CHECK (count >= 0),
     status TEXT NOT NULL DEFAULT '완료' CHECK (status IN ('완료', '진행중', '취소')),
     work_indicator TEXT NOT NULL DEFAULT '기타/행정' CHECK (work_indicator IN ('R&R/루틴업무', '현안대응', '품질고도화 과제', '조직운영관리', '기타/행정')),
     task_code TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT fk_work_logs_member FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_work_logs_status ON work_logs(status);
@@ -97,635 +109,694 @@ CREATE INDEX IF NOT EXISTS idx_work_logs_member_id ON work_logs(member_id);
 CREATE INDEX IF NOT EXISTS idx_work_logs_date ON work_logs(date);
 CREATE INDEX IF NOT EXISTS idx_work_logs_category ON work_logs(category);
 CREATE INDEX IF NOT EXISTS idx_work_logs_member_date ON work_logs(member_id, date);
+CREATE INDEX IF NOT EXISTS idx_members_team_id ON members(team_id);
 
 CREATE TABLE IF NOT EXISTS categories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     parent_id INTEGER,
     sort_order INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (parent_id) REFERENCES categories(id) ON DELETE CASCADE
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT fk_categories_parent FOREIGN KEY (parent_id) REFERENCES categories(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    table_name TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    record_id TEXT NOT NULL,
+    old_data JSONB,
+    new_data JSONB,
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_table_record ON audit_logs(table_name, record_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_changed_at ON audit_logs(changed_at);
+
+CREATE OR REPLACE FUNCTION log_audit_trail() RETURNS TRIGGER AS $$
+BEGIN
+    IF (TG_OP = 'DELETE') THEN
+        INSERT INTO audit_logs (table_name, operation, record_id, old_data)
+        VALUES (TG_TABLE_NAME, TG_OP, OLD.id::text, row_to_json(OLD)::jsonb);
+        RETURN OLD;
+    ELSIF (TG_OP = 'UPDATE') THEN
+        IF (row_to_json(OLD)::jsonb = row_to_json(NEW)::jsonb) THEN
+            RETURN NEW;
+        END IF;
+        INSERT INTO audit_logs (table_name, operation, record_id, old_data, new_data)
+        VALUES (TG_TABLE_NAME, TG_OP, NEW.id::text, row_to_json(OLD)::jsonb, row_to_json(NEW)::jsonb);
+        RETURN NEW;
+    ELSIF (TG_OP = 'INSERT') THEN
+        INSERT INTO audit_logs (table_name, operation, record_id, new_data)
+        VALUES (TG_TABLE_NAME, TG_OP, NEW.id::text, row_to_json(NEW)::jsonb);
+        RETURN NEW;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION notify_db_change() RETURNS TRIGGER AS $$
+BEGIN
+  PERFORM pg_notify('db_changed', TG_TABLE_NAME);
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
 `;
 
-function getSettingsPath(): string {
-  return path.join(app.getPath('userData'), 'settings.json');
+function mapRowToWorkLog(r: Record<string, unknown>): WorkLog {
+  const d = r.date;
+  const dateStr = d instanceof Date ? d.toISOString().slice(0, 10) : String(d ?? '');
+  const ts = (v: unknown) => (v instanceof Date ? v.toISOString() : String(v ?? ''));
+  return {
+    id: String(r.id),
+    memberId: String(r.memberId),
+    date: dateStr,
+    category: String(r.category),
+    content: String(r.content),
+    issues: r.issues == null ? undefined : String(r.issues),
+    duration: Number(r.duration),
+    count: Number(r.count),
+    status: r.status as WorkLog['status'],
+    workIndicator: r.workIndicator as WorkLog['workIndicator'],
+    taskCode: r.taskCode == null || r.taskCode === '' ? undefined : String(r.taskCode),
+    createdAt: ts(r.createdAt),
+    updatedAt: ts(r.updatedAt),
+  };
 }
 
-function loadSavedDbPath(): string | null {
-  try {
-    const settingsPath = getSettingsPath();
-    if (fs.existsSync(settingsPath)) {
-      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-      return settings.dbPath || null;
-    }
-  } catch {
-    // ignore
-  }
-  return null;
-}
-
-function saveDbPath(dbPath: string): void {
-  const settingsPath = getSettingsPath();
-  const dir = path.dirname(settingsPath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  fs.writeFileSync(settingsPath, JSON.stringify({ dbPath }));
-}
+const WORK_LOG_SELECT = `
+      SELECT w.id,
+             w.member_id AS "memberId",
+             w.date::text AS date,
+             w.category,
+             w.content,
+             w.issues,
+             w.duration,
+             w.count,
+             w.status,
+             w.work_indicator AS "workIndicator",
+             w.task_code AS "taskCode",
+             w.created_at AS "createdAt",
+             w.updated_at AS "updatedAt"
+`;
 
 export class ElectronDatabaseAdapter {
-  private db: Database.Database | null = null;
-  private dbPath: string;
-  private config: { dbPath?: string; isConnected: boolean; adapterType: string };
+  private pool: Pool | null = null;
+  private pgConfig: PgConnectionConfig | null = null;
+  private config: DatabaseConfig;
+  private listenerClient: PoolClient | null = null;
+  private changeListeners: Array<(payload: string) => void> = [];
+
+  private static readonly WRITE_MAX_ATTEMPTS = 6;
+  private static readonly PROTOCOL_RETRY_DELAY_MS = 500;
 
   constructor() {
-    this.dbPath = path.join(app.getPath('userData'), 'team-worklog.db');
-    this.config = { dbPath: this.dbPath, isConnected: false, adapterType: 'sqlite' };
+    this.config = { isConnected: false, adapterType: 'postgresql' };
   }
 
+  onChange(callback: (payload: string) => void): () => void {
+    this.changeListeners.push(callback);
+    return () => {
+      this.changeListeners = this.changeListeners.filter((cb) => cb !== callback);
+    };
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private getPgErrorCode(err: unknown): string | undefined {
+    if (!err || typeof err !== 'object') return undefined;
+    const c = (err as { code?: string }).code;
+    return typeof c === 'string' ? c : undefined;
+  }
+
+  private isRetryablePgWriteError(err: unknown): boolean {
+    if (!(err instanceof Error)) return false;
+    const code = this.getPgErrorCode(err);
+    const msg = err.message.toLowerCase();
+    if (msg.includes('constraint') || msg.includes('not null') || msg.includes('unique')) return false;
+    const retryCodes = ['40P01', '40001', '57P01', '57P02', '57P03', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE'];
+    if (code && retryCodes.includes(code)) return true;
+    if (msg.includes('deadlock') || msg.includes('serialization failure')) return true;
+    if (msg.includes('too many clients')) return true;
+    if (msg.includes('connection') && (msg.includes('terminated') || msg.includes('closed'))) return true;
+    return false;
+  }
+
+  private async runWithRetriesAsync<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) { // PostgreSQL은 데드락 등 일시적 에러만 3회 재시도
+      try {
+        return await fn();
+      } catch (e) {
+        lastErr = e;
+        if (!this.isRetryablePgWriteError(e) || attempt === 2) {
+          throw e;
+        }
+        console.warn(`[DB] 쓰기 재시도 ${attempt + 1}/2 (${label}, async):`, e instanceof Error ? e.message : String(e));
+        await this.sleep(ElectronDatabaseAdapter.PROTOCOL_RETRY_DELAY_MS);
+      }
+    }
+    throw lastErr;
+  }
+
+  private requirePool(): Pool {
+    if (!this.pool) throw new Error('DB가 초기화되지 않았습니다. initialize()를 호출하세요.');
+    return this.pool;
+  }
+
+  private async closePool(): Promise<void> {
+    if (!this.pool) return;
+    try {
+      if (this.listenerClient) {
+        this.listenerClient.release();
+        this.listenerClient = null;
+      }
+      await this.pool.end();
+    } catch {
+      /* ignore */
+    }
+    this.pool = null;
+    this.config.isConnected = false;
+  }
+
+  /** 앱 종료 시 풀 정리 */
+  async close(): Promise<void> {
+    await this.closePool();
+    this.pgConfig = null;
+  }
+
+  /**
+   * 스키마 적용 + 부트스트랩(팀/마스터/카테고리/샘플).
+   * Pool 생성, 연결 검증, DDL, 시드까지 수행합니다.
+   */
   async initialize(): Promise<void> {
-    if (this.db) return; // 이미 초기화됨
-    const savedPath = loadSavedDbPath();
-    if (savedPath) {
-      this.dbPath = savedPath;
-    }
+    if (this.pool && this.config.isConnected) return;
 
-    const dir = path.dirname(this.dbPath);
-    const dbExists = fs.existsSync(this.dbPath);
-    const isNetworkPath = this.dbPath.startsWith('\\\\') || /^[A-Za-z]:\\.*$/.test(this.dbPath) && this.dbPath.includes('\\\\');
+    await this.closePool();
 
-    console.log('[DB] 연결 시도:', this.dbPath);
-    console.log('[DB] 파일 존재:', dbExists ? '예' : '아니오 (신규 생성)');
-    if (isNetworkPath) console.log('[DB] 네트워크/공유 경로 감지 - WAL 실패 시 DELETE 모드로 전환');
+    const conn = mergePgConnectionFromDiskAndEnv();
+    this.pgConfig = conn;
 
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+    console.log('[DB] PostgreSQL 연결 시도:', `${conn.user}@${conn.host}:${conn.port}/${conn.database}`);
+
+    // TCP keepalive 켜기(OS·런타임 기본 주기). 짧은 주기는 pg `keepAliveInitialDelayMillis`로 따로 두지 않음.
+    // 서버 측 `tcp_keepalives_*`는 NAS 부하와 트레이드오프이므로 `docs/POSTGRESQL_PARITY_PLAN.md` QA 권장값 참고.
+    this.pool = new Pool({
+      host: conn.host,
+      port: conn.port,
+      user: conn.user,
+      password: conn.password,
+      database: conn.database,
+      max: 3,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 5000,
+      keepAlive: true,
+    });
 
     try {
-      this.db = new Database(this.dbPath);
+      const p = this.requirePool();
+      await p.query('SELECT 1');
 
-      try {
-        this.db.pragma('journal_mode = WAL');
-        this.db.pragma('synchronous = NORMAL');
-        const walMode = (this.db.prepare('PRAGMA journal_mode').get() as { journal_mode: string })?.journal_mode || 'unknown';
-        const syncVal = (this.db.prepare('PRAGMA synchronous').get() as { synchronous: number })?.synchronous ?? -1;
-        console.log('[DB] WAL 모드:', walMode, '| synchronous:', syncVal === 1 ? 'NORMAL' : syncVal);
-      } catch (walErr: unknown) {
-        console.error('[DB] WAL 설정 실패 (공유폴더/네트워크 드라이브일 수 있음):', walErr instanceof Error ? walErr.message : String(walErr));
-        console.error('[DB] 상세:', JSON.stringify(walErr, null, 2));
-        this.db.pragma('journal_mode = DELETE');
-        this.db.pragma('synchronous = FULL');
-        console.log('[DB] DELETE 모드로 전환 (동시성 제한됨)');
-      }
+      await p.query(SCHEMA_SQL);
+      await this.ensureReferentialFKs();
+      await this.runBootstraps();
 
-      this.db.pragma('foreign_keys = ON');
-      this.db.exec(SCHEMA_SQL);
-      this.runMigrations();
-      this.initializeCategories();
-
-      // DB가 비어있으면 내장 샘플 데이터 삽입 (exe 실행 시 바로 표시)
-      const memberCount = (this.db!.prepare('SELECT COUNT(*) as count FROM members').get() as { count: number }).count;
-      if (memberCount === 0) {
+      const mc = await p.query<{ c: string }>('SELECT COUNT(*)::text AS c FROM members');
+      const c = Number(mc.rows[0]?.c ?? '0');
+      if (c === 0) {
         await this.seedSampleData();
       }
 
+      this.listenerClient = await p.connect();
+      await this.listenerClient.query('LISTEN db_changed');
+      this.listenerClient.on('notification', (msg) => {
+        if (msg.channel === 'db_changed') {
+          for (const cb of this.changeListeners) {
+            cb(msg.payload || '');
+          }
+        }
+      });
+
       this.config.isConnected = true;
-      this.config.dbPath = this.dbPath;
+      this.config.adapterType = 'postgresql';
+      this.config.dbPath = undefined;
+      this.config.pg = {
+        host: conn.host,
+        port: conn.port,
+        user: conn.user,
+        database: conn.database,
+      };
       console.log('[DB] 연결 완료');
     } catch (err: unknown) {
-      console.error('[DB] 초기화 실패:', err instanceof Error ? err.message : String(err));
-      console.error('[DB] 경로:', this.dbPath);
-      console.error('[DB] 스택:', err instanceof Error ? err.stack : undefined);
-      throw err;
+      const msg = formatPgConnectionError(err);
+      console.error('[DB] 초기화 실패:', msg);
+      await this.closePool();
+      throw new Error(msg);
     }
   }
 
-  private runMigrations(): void {
-    // work_logs: 구 urgency/difficulty CHECK 제약 제거 (신규값 '1일 이내' 등 허용)
-    try {
-      const row = this.db!.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='work_logs'").get() as { sql: string } | undefined;
-      const sql = row?.sql || '';
-      if (sql.includes("urgency IN ('매우높음'")) {
-        const cols = (this.db!.prepare("PRAGMA table_info(work_logs)").all() as { name: string }[]).map(c => c.name);
-        const hasIssues = cols.includes('issues');
-        const selIssues = hasIssues ? 'issues' : 'NULL';
-        this.db!.exec(`
-          CREATE TABLE work_logs_new (
-            id TEXT PRIMARY KEY,
-            member_id TEXT NOT NULL,
-            date TEXT NOT NULL,
-            category TEXT NOT NULL,
-            content TEXT NOT NULL,
-            issues TEXT,
-            duration REAL NOT NULL,
-            count INTEGER NOT NULL DEFAULT 1,
-            status TEXT NOT NULL DEFAULT '완료' CHECK (status IN ('완료', '진행중', '취소')),
-            urgency TEXT NOT NULL,
-            difficulty TEXT NOT NULL,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE
-          )
-        `);
-        this.db!.exec(`
-          INSERT INTO work_logs_new SELECT
-            id, member_id, date, category, content, ${selIssues}, duration, count, status,
-            CASE urgency
-              WHEN '매우높음' THEN '1일 이내'
-              WHEN '높음' THEN '3일 이내'
-              WHEN '중간' THEN '7일 이내'
-              WHEN '낮음' THEN '2주 이내'
-              ELSE urgency
-            END,
-            CASE difficulty
-              WHEN '중상' THEN '상'
-              WHEN '중하' THEN '하'
-              ELSE difficulty
-            END,
-            created_at, updated_at
-          FROM work_logs
-        `);
-        this.db!.exec('DROP TABLE work_logs');
-        this.db!.exec('ALTER TABLE work_logs_new RENAME TO work_logs');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_status ON work_logs(status)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_member_status ON work_logs(member_id, status)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_member_id ON work_logs(member_id)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_date ON work_logs(date)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_category ON work_logs(category)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_member_date ON work_logs(member_id, date)');
-        console.log('[DB] work_logs urgency/difficulty CHECK 제약 마이그레이션 완료');
-      }
-    } catch (e: unknown) {
-      console.warn('[DB] work_logs CHECK 마이그레이션:', e instanceof Error ? e.message : String(e));
-    }
-    // categories: parent_id 컬럼 (구 스키마 호환)
-    try {
-      const tableInfo = this.db!.prepare("PRAGMA table_info(categories)").all() as { name: string }[];
-      const hasParentId = tableInfo.some(c => c.name === 'parent_id');
-      if (!hasParentId) {
-        try {
-          this.db!.exec('ALTER TABLE categories ADD COLUMN parent_id INTEGER REFERENCES categories(id)');
-        } catch (alterErr) {
-          // ALTER 실패 시 테이블 재생성 (구 스키마 DB에서 parent_id 추가 불가 시)
-          this.db!.exec('DROP TABLE IF EXISTS categories');
-          this.db!.exec(`
-            CREATE TABLE categories (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              name TEXT NOT NULL,
-              parent_id INTEGER,
-              sort_order INTEGER NOT NULL DEFAULT 0,
-              created_at TEXT DEFAULT (datetime('now')),
-              FOREIGN KEY (parent_id) REFERENCES categories(id) ON DELETE CASCADE
-            )
-          `);
-          this.db!.exec('CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id)');
-        }
-      }
-    } catch (_) { /* already migrated */ }
-    try {
-      const wlInfo = this.db!.prepare("PRAGMA table_info(work_logs)").all() as { name: string }[];
-      if (!wlInfo.some(c => c.name === 'issues')) {
-        this.db!.exec('ALTER TABLE work_logs ADD COLUMN issues TEXT');
-      }
-    } catch (_) { /* already migrated */ }
-    try {
-      const wlInfo = this.db!.prepare("PRAGMA table_info(work_logs)").all() as { name: string }[];
-      if (!wlInfo.some(c => c.name === 'task_code')) {
-        this.db!.exec('ALTER TABLE work_logs ADD COLUMN task_code TEXT');
-      }
-    } catch (_) { /* already migrated */ }
-    // urgency/difficulty -> work_indicator 마이그레이션
-    try {
-      const wlInfo = this.db!.prepare("PRAGMA table_info(work_logs)").all() as { name: string }[];
-      const hasWorkIndicator = wlInfo.some(c => c.name === 'work_indicator');
-      const hasUrgency = wlInfo.some(c => c.name === 'urgency');
-      if (hasUrgency || !hasWorkIndicator) {
-        this.db!.exec(`
-          CREATE TABLE work_logs_new (
-            id TEXT PRIMARY KEY,
-            member_id TEXT NOT NULL,
-            date TEXT NOT NULL,
-            category TEXT NOT NULL,
-            content TEXT NOT NULL,
-            issues TEXT,
-            duration REAL NOT NULL,
-            count INTEGER NOT NULL DEFAULT 1,
-            status TEXT NOT NULL DEFAULT '완료' CHECK (status IN ('완료', '진행중', '취소')),
-            work_indicator TEXT NOT NULL DEFAULT '기타/행정' CHECK (work_indicator IN ('R&R/루틴업무', '현안대응', '품질고도화 과제', '조직운영관리', '기타/행정')),
-            task_code TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE
-          )
-        `);
-        const hasIssues = wlInfo.some(c => c.name === 'issues');
-        const hasTaskCode = wlInfo.some(c => c.name === 'task_code');
-        const selIssues = hasIssues ? 'issues' : 'NULL';
-        const selTaskCode = hasTaskCode ? 'task_code' : 'NULL';
-        const selWorkIndicator = hasWorkIndicator ? "COALESCE(work_indicator, '기타')" : "'기타'";
-        this.db!.exec(`
-          INSERT INTO work_logs_new SELECT
-            id, member_id, date, category, content, ${selIssues}, duration, count, status,
-            ${selWorkIndicator}, ${selTaskCode}, created_at, updated_at
-          FROM work_logs
-        `);
-        this.db!.exec('DROP TABLE work_logs');
-        this.db!.exec('ALTER TABLE work_logs_new RENAME TO work_logs');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_status ON work_logs(status)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_member_status ON work_logs(member_id, status)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_member_id ON work_logs(member_id)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_date ON work_logs(date)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_category ON work_logs(category)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_member_date ON work_logs(member_id, date)');
-        console.log('[DB] work_indicator 마이그레이션 완료');
-      }
-    } catch (e: unknown) {
-      console.warn('[DB] work_indicator 마이그레이션:', e instanceof Error ? e.message : String(e));
-    }
-    // work_indicator 구값 -> 신규값 마이그레이션 (루틴->R&R/루틴업무 등)
-    try {
-      const oldVals = ['루틴', '대응', '성장', '지원', '기타'];
-      const newVals = ['R&R/루틴업무', '현안대응', '품질고도화 과제', '조직운영관리', '기타/행정'];
-      const anyOld = this.db!.prepare("SELECT 1 FROM work_logs WHERE work_indicator IN ('루틴','대응','성장','지원','기타') LIMIT 1").get();
-      if (anyOld) {
-        this.db!.exec(`
-          CREATE TABLE work_logs_new (
-            id TEXT PRIMARY KEY,
-            member_id TEXT NOT NULL,
-            date TEXT NOT NULL,
-            category TEXT NOT NULL,
-            content TEXT NOT NULL,
-            issues TEXT,
-            duration REAL NOT NULL,
-            count INTEGER NOT NULL DEFAULT 1,
-            status TEXT NOT NULL DEFAULT '완료' CHECK (status IN ('완료', '진행중', '취소')),
-            work_indicator TEXT NOT NULL DEFAULT '기타/행정' CHECK (work_indicator IN ('R&R/루틴업무', '현안대응', '품질고도화 과제', '조직운영관리', '기타/행정')),
-            task_code TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE
-          )
-        `);
-        const mapCase = oldVals.map((o, i) => `WHEN work_indicator='${o}' THEN '${newVals[i]}'`).join(' ');
-        this.db!.exec(`
-          INSERT INTO work_logs_new SELECT
-            id, member_id, date, category, content, issues, duration, count, status,
-            CASE ${mapCase} ELSE '기타/행정' END, task_code, created_at, updated_at
-          FROM work_logs
-        `);
-        this.db!.exec('DROP TABLE work_logs');
-        this.db!.exec('ALTER TABLE work_logs_new RENAME TO work_logs');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_status ON work_logs(status)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_member_status ON work_logs(member_id, status)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_member_id ON work_logs(member_id)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_date ON work_logs(date)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_category ON work_logs(category)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_member_date ON work_logs(member_id, date)');
-        console.log('[DB] work_indicator 구값->신규값 마이그레이션 완료');
-      }
-    } catch (e: unknown) {
-      console.warn('[DB] work_indicator 구값 마이그레이션:', e instanceof Error ? e.message : String(e));
-    }
-
-    // R&R/고유업무 → R&R/루틴업무 (기존 DB CHECK·데이터 정합)
-    try {
-      const row = this.db!.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='work_logs'").get() as
-        | { sql: string | null }
-        | undefined;
-      const ddl = row?.sql ?? '';
-      if (ddl.includes("'R&R/고유업무'") && !ddl.includes("'R&R/루틴업무'")) {
-        this.db!.exec(`
-          CREATE TABLE work_logs_mig_rr (
-            id TEXT PRIMARY KEY,
-            member_id TEXT NOT NULL,
-            date TEXT NOT NULL,
-            category TEXT NOT NULL,
-            content TEXT NOT NULL,
-            issues TEXT,
-            duration REAL NOT NULL,
-            count INTEGER NOT NULL DEFAULT 1,
-            status TEXT NOT NULL DEFAULT '완료' CHECK (status IN ('완료', '진행중', '취소')),
-            work_indicator TEXT NOT NULL DEFAULT '기타/행정' CHECK (work_indicator IN ('R&R/루틴업무', '현안대응', '품질고도화 과제', '조직운영관리', '기타/행정')),
-            task_code TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE
-          )
-        `);
-        this.db!.exec(`
-          INSERT INTO work_logs_mig_rr
-          SELECT
-            id, member_id, date, category, content, issues, duration, count, status,
-            CASE WHEN work_indicator = 'R&R/고유업무' THEN 'R&R/루틴업무' ELSE work_indicator END,
-            task_code, created_at, updated_at
-          FROM work_logs
-        `);
-        this.db!.exec('DROP TABLE work_logs');
-        this.db!.exec('ALTER TABLE work_logs_mig_rr RENAME TO work_logs');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_status ON work_logs(status)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_member_status ON work_logs(member_id, status)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_member_id ON work_logs(member_id)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_date ON work_logs(date)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_category ON work_logs(category)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_member_date ON work_logs(member_id, date)');
-        console.log('[DB] work_indicator R&R/루틴업무 라벨 마이그레이션 완료');
-      }
-    } catch (e: unknown) {
-      console.warn('[DB] R&R/루틴업무 라벨 마이그레이션:', e instanceof Error ? e.message : String(e));
-    }
-
-    // teams 테이블 + members.team_id
-    try {
-      this.db!.exec(`
-        CREATE TABLE IF NOT EXISTS teams (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          sort_order INTEGER NOT NULL DEFAULT 0,
-          created_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_teams_sort ON teams(sort_order);
-      `);
-      const memberCols = this.db!.prepare('PRAGMA table_info(members)').all() as { name: string }[];
-      if (!memberCols.some(c => c.name === 'team_id')) {
-        this.db!.exec('ALTER TABLE members ADD COLUMN team_id TEXT REFERENCES teams(id)');
-      }
-      this.ensureDefaultTeams();
-      this.db!.prepare('UPDATE members SET team_id = ? WHERE team_id IS NULL OR team_id = ?').run(TEAM_QG2_ID, '');
-    } catch (e: unknown) {
-      console.warn('[DB] teams 마이그레이션:', e instanceof Error ? e.message : String(e));
-    }
-
-    try {
-      const memberColsEmp = this.db!.prepare('PRAGMA table_info(members)').all() as { name: string }[];
-      if (!memberColsEmp.some((c) => c.name === 'employee_no')) {
-        this.db!.exec('ALTER TABLE members ADD COLUMN employee_no TEXT');
-      }
-    } catch (e: unknown) {
-      console.warn('[DB] members employee_no 마이그레이션:', e instanceof Error ? e.message : String(e));
-    }
-
-    try {
-      const memberColsStatus = this.db!.prepare('PRAGMA table_info(members)').all() as { name: string }[];
-      if (!memberColsStatus.some((c) => c.name === 'status_message')) {
-        this.db!.exec('ALTER TABLE members ADD COLUMN status_message TEXT');
-      }
-    } catch (e: unknown) {
-      console.warn('[DB] members status_message 마이그레이션:', e instanceof Error ? e.message : String(e));
-    }
-
-    try {
-      const tc = this.db!.prepare('PRAGMA table_info(teams)').all() as { name: string }[];
-      if (!tc.some((c) => c.name === 'admin_login_id')) {
-        this.db!.exec('ALTER TABLE teams ADD COLUMN admin_login_id TEXT');
-      }
-      if (!tc.some((c) => c.name === 'admin_password_hash')) {
-        this.db!.exec('ALTER TABLE teams ADD COLUMN admin_password_hash TEXT');
-      }
-      if (!tc.some((c) => c.name === 'admin_extra_json')) {
-        this.db!.exec('ALTER TABLE teams ADD COLUMN admin_extra_json TEXT');
-      }
-      this.ensureMasterDefaults();
-    } catch (e: unknown) {
-      console.warn('[DB] teams admin / master:', e instanceof Error ? e.message : String(e));
-    }
-
-    // work_logs: duration·count 비음 제약(CHECK)
-    try {
-      const row = this.db!.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='work_logs'").get() as
-        | { sql: string | null }
-        | undefined;
-      const ddl = row?.sql ?? '';
-      if (!ddl.includes('duration >= 0') || !ddl.includes('count >= 0')) {
-        this.db!.exec(`
-          CREATE TABLE work_logs_nonneg_chk (
-            id TEXT PRIMARY KEY,
-            member_id TEXT NOT NULL,
-            date TEXT NOT NULL,
-            category TEXT NOT NULL,
-            content TEXT NOT NULL,
-            issues TEXT,
-            duration REAL NOT NULL CHECK (duration >= 0),
-            count INTEGER NOT NULL DEFAULT 1 CHECK (count >= 0),
-            status TEXT NOT NULL DEFAULT '완료' CHECK (status IN ('완료', '진행중', '취소')),
-            work_indicator TEXT NOT NULL DEFAULT '기타/행정' CHECK (work_indicator IN ('R&R/루틴업무', '현안대응', '품질고도화 과제', '조직운영관리', '기타/행정')),
-            task_code TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE
-          )
-        `);
-        this.db!.exec(`
-          INSERT INTO work_logs_nonneg_chk SELECT
-            id,
-            member_id,
-            date,
-            category,
-            content,
-            issues,
-            MAX(0.0, ROUND(COALESCE(duration, 0), 4)),
-            MAX(0, CAST(ABS(ROUND(COALESCE(count, 0))) AS INTEGER)),
-            status,
-            work_indicator,
-            task_code,
-            created_at,
-            updated_at
-          FROM work_logs
-        `);
-        this.db!.exec('DROP TABLE work_logs');
-        this.db!.exec('ALTER TABLE work_logs_nonneg_chk RENAME TO work_logs');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_status ON work_logs(status)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_member_status ON work_logs(member_id, status)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_member_id ON work_logs(member_id)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_date ON work_logs(date)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_category ON work_logs(category)');
-        this.db!.exec('CREATE INDEX IF NOT EXISTS idx_work_logs_member_date ON work_logs(member_id, date)');
-        console.log('[DB] work_logs duration/count CHECK 마이그레이션 완료');
-      }
-    } catch (e: unknown) {
-      console.warn('[DB] work_logs nonnegative CHECK:', e instanceof Error ? e.message : String(e));
-    }
+  /** Pool 없이 입력값으로 연결 가능 여부 확인 (타임아웃 포함) */
+  async testConnection(
+    config: PgConnectionConfig
+  ): Promise<{ ok: true } | { ok: false; errorMessage: string }> {
+    return testPgConnectionRaw(config);
   }
 
-  private ensureMasterDefaults(): void {
-    const hasId = this.db!.prepare('SELECT 1 FROM app_settings WHERE key = ?').get('master_login_id');
-    if (!hasId) {
-      this.db!.prepare('INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, datetime(\'now\'))').run(
-        'master_login_id',
-        '201521570'
+  /** 구 버전에서 FK 가 없을 수 있어 보강 */
+  private async ensureReferentialFKs(): Promise<void> {
+    const p = this.requirePool();
+    await p.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'fk_members_team'
+        ) THEN
+          ALTER TABLE members
+            ADD CONSTRAINT fk_members_team FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE SET NULL;
+        END IF;
+      EXCEPTION WHEN duplicate_object THEN NULL;
+      END $$;
+    `);
+    await p.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'fk_work_logs_member'
+        ) THEN
+          ALTER TABLE work_logs
+            ADD CONSTRAINT fk_work_logs_member FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE;
+        END IF;
+      EXCEPTION WHEN duplicate_object THEN NULL;
+      END $$;
+    `);
+    await p.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'fk_categories_parent'
+        ) THEN
+          ALTER TABLE categories
+            ADD CONSTRAINT fk_categories_parent FOREIGN KEY (parent_id) REFERENCES categories(id) ON DELETE CASCADE;
+        END IF;
+      EXCEPTION WHEN duplicate_object THEN NULL;
+      END $$;
+    `);
+    
+    // 트리거 보강
+    await p.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'work_logs_notify_trigger') THEN
+          CREATE TRIGGER work_logs_notify_trigger
+          AFTER INSERT OR UPDATE OR DELETE ON work_logs
+          FOR EACH STATEMENT EXECUTE FUNCTION notify_db_change();
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'work_logs_audit_trigger') THEN
+          CREATE TRIGGER work_logs_audit_trigger
+          AFTER INSERT OR UPDATE OR DELETE ON work_logs
+          FOR EACH ROW EXECUTE FUNCTION log_audit_trail();
+        END IF;
+
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'members_notify_trigger') THEN
+          CREATE TRIGGER members_notify_trigger
+          AFTER INSERT OR UPDATE OR DELETE ON members
+          FOR EACH STATEMENT EXECUTE FUNCTION notify_db_change();
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'members_audit_trigger') THEN
+          CREATE TRIGGER members_audit_trigger
+          AFTER INSERT OR UPDATE OR DELETE ON members
+          FOR EACH ROW EXECUTE FUNCTION log_audit_trail();
+        END IF;
+
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'teams_notify_trigger') THEN
+          CREATE TRIGGER teams_notify_trigger
+          AFTER INSERT OR UPDATE OR DELETE ON teams
+          FOR EACH STATEMENT EXECUTE FUNCTION notify_db_change();
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'teams_audit_trigger') THEN
+          CREATE TRIGGER teams_audit_trigger
+          AFTER INSERT OR UPDATE OR DELETE ON teams
+          FOR EACH ROW EXECUTE FUNCTION log_audit_trail();
+        END IF;
+      END $$;
+    `);
+  }
+
+  private async runBootstraps(): Promise<void> {
+    const p = this.requirePool();
+    await this.runWithRetriesAsync('runBootstraps', async () => {
+      // 마이그레이션: department 컬럼 추가 및 기본값 설정
+      await p.query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS department TEXT`);
+      await p.query(`UPDATE teams SET department = '품질보증실' WHERE department IS NULL`);
+
+      await this.ensureDefaultTeams(p);
+      await p.query(
+        `UPDATE members SET team_id = $1 WHERE team_id IS NULL OR team_id = '' OR team_id = $2`,
+        [TEAM_QG2_ID, '']
+      );
+      await this.ensureMasterDefaults(p);
+      await this.initializeCategories(p);
+    });
+  }
+
+  private async ensureMasterDefaults(exec: SqlExecutor): Promise<void> {
+    const hasId = await exec.query('SELECT 1 FROM app_settings WHERE key = $1 LIMIT 1', ['master_login_id']);
+    if (hasId.rowCount === 0) {
+      await exec.query(
+        `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2, now())`,
+        ['master_login_id', '201521570']
       );
     }
-    const hasPw = this.db!.prepare('SELECT 1 FROM app_settings WHERE key = ?').get('master_password_hash');
-    if (!hasPw) {
-      this.db!.prepare('INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, datetime(\'now\'))').run(
+    const hasPw = await exec.query('SELECT 1 FROM app_settings WHERE key = $1 LIMIT 1', ['master_password_hash']);
+    if (hasPw.rowCount === 0) {
+      await exec.query(`INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2, now())`, [
         'master_password_hash',
-        hashPassword('1111')
-      );
+        hashTeamlogPassword('1111'),
+      ]);
     }
   }
 
-  private ensureDefaultTeams(): void {
-    const count = (this.db!.prepare('SELECT COUNT(*) as c FROM teams').get() as { c: number }).c;
-    if (count === 0) {
-      const ins = this.db!.prepare('INSERT INTO teams (id, name, sort_order) VALUES (?, ?, ?)');
+  private async ensureDefaultTeams(exec: SqlExecutor): Promise<void> {
+    const c = await exec.query<{ n: string }>('SELECT COUNT(*)::text AS n FROM teams');
+    if (Number(c.rows[0]?.n ?? '0') === 0) {
       for (const t of DEFAULT_TEAMS_SEED) {
-        ins.run(t.id, t.name, t.sortOrder);
+        await exec.query('INSERT INTO teams (id, name, sort_order) VALUES ($1, $2, $3)', [t.id, t.name, t.sortOrder]);
       }
     }
   }
 
-  private initializeCategories(): void {
-    const count = this.db!.prepare('SELECT COUNT(*) as count FROM categories').get() as { count: number };
-    if (count.count === 0) {
-      const roots: string[] = [];
-      const children: { parent: string; child: string }[] = [];
-      const seenRoots = new Set<string>();
-      QA_CATEGORIES_FLAT.forEach((displayName) => {
-        if (displayName.includes(' > ')) {
-          const [p, c] = displayName.split(' > ');
-          if (!seenRoots.has(p!)) {
-            seenRoots.add(p!);
-            roots.push(p!);
-          }
-          children.push({ parent: p!, child: c!.trim() });
-        } else if (!seenRoots.has(displayName)) {
-          seenRoots.add(displayName);
-          roots.push(displayName);
+  private async initializeCategories(exec: SqlExecutor): Promise<void> {
+    const cnt = await exec.query<{ n: string }>('SELECT COUNT(*)::text AS n FROM categories');
+    if (Number(cnt.rows[0]?.n ?? '0') !== 0) return;
+
+    const roots: string[] = [];
+    const children: { parent: string; child: string }[] = [];
+    const seenRoots = new Set<string>();
+    QA_CATEGORIES_FLAT.forEach((displayName) => {
+      if (displayName.includes(' > ')) {
+        const [p, c] = displayName.split(' > ');
+        if (!seenRoots.has(p!)) {
+          seenRoots.add(p!);
+          roots.push(p!);
         }
-      });
-      const insert = this.db!.prepare('INSERT INTO categories (name, parent_id, sort_order) VALUES (?, ?, ?)');
-      const parentIds = new Map<string, number>();
-      roots.forEach((name, i) => {
-        const res = insert.run(name, null, i + 1);
-        parentIds.set(name, (res as { lastInsertRowid: number }).lastInsertRowid);
-      });
-      children.forEach((c, i) => {
-        const pid = parentIds.get(c.parent);
-        insert.run(c.child, pid ?? null, i + 1);
-      });
+        children.push({ parent: p!, child: c!.trim() });
+      } else if (!seenRoots.has(displayName)) {
+        seenRoots.add(displayName);
+        roots.push(displayName);
+      }
+    });
+    const parentIds = new Map<string, number>();
+    for (let i = 0; i < roots.length; i++) {
+      const name = roots[i]!;
+      const r = await exec.query<{ id: number }>(
+        'INSERT INTO categories (name, parent_id, sort_order) VALUES ($1, NULL, $2) RETURNING id',
+        [name, i + 1]
+      );
+      parentIds.set(name, r.rows[0]!.id);
+    }
+    for (let i = 0; i < children.length; i++) {
+      const c = children[i]!;
+      const pid = parentIds.get(c.parent) ?? null;
+      await exec.query('INSERT INTO categories (name, parent_id, sort_order) VALUES ($1, $2, $3)', [
+        c.child,
+        pid,
+        i + 1,
+      ]);
     }
   }
 
-  /** exe 실행 시 바로 보이도록 내장 샘플 데이터 삽입 (품질보증2팀만, 1팀은 빈 팀) */
   private async seedSampleData(): Promise<void> {
     const { members, logs, categories } = generateSampleData();
-    const teams: WorkTeam[] = DEFAULT_TEAMS_SEED.map(t => ({ id: t.id, name: t.name, sortOrder: t.sortOrder }));
+    const teams: WorkTeam[] = DEFAULT_TEAMS_SEED.map((t) => ({ id: t.id, name: t.name, sortOrder: t.sortOrder }));
     await this.importData({ teams, members, logs, categories });
     console.log('[DB] 내장 샘플 데이터 삽입 완료');
   }
 
-  getConfig() {
+  getConfig(): DatabaseConfig {
     return { ...this.config };
   }
 
-  async setDbPath(newPath: string): Promise<void> {
-    if (this.db) {
-      this.db.close();
-      this.db = null;
-    }
-    this.dbPath = newPath;
-    saveDbPath(newPath);
-    await this.initialize();
+  async setDbPath(_newPath: string): Promise<void> {
+    throw new Error(
+      'PostgreSQL 모드에서는 SQLite dbPath를 사용하지 않습니다. userData/settings.json의 "pg" 또는 PG* 환경 변수를 설정하세요.'
+    );
   }
 
   isConnected(): boolean {
-    return this.config.isConnected && this.db !== null;
+    return this.config.isConnected && this.pool !== null;
+  }
+
+  /** 표시용 연결 요약 (비밀번호 제외) */
+  getConnectionSummary(): string {
+    const c = this.pgConfig ?? mergePgConnectionFromDiskAndEnv();
+    return `${c.user}@${c.host}:${c.port}/${c.database}`;
+  }
+
+  private async fetchWorkLogById(exec: SqlExecutor, id: string): Promise<WorkLog | null> {
+    const r = await exec.query(`${WORK_LOG_SELECT} FROM work_logs w WHERE w.id = $1`, [id]);
+    if (r.rows.length === 0) return null;
+    return mapRowToWorkLog(r.rows[0] as Record<string, unknown>);
+  }
+
+  /**
+   * 삭제·수정·추가를 단일 트랜잭션으로 처리합니다.
+   * Pool에서 Client 를 빌려 BEGIN → 작업 → COMMIT, 실패 시 ROLLBACK.
+   */
+  async saveLogsBatch(payload: SaveLogsBatchPayload): Promise<void> {
+    await this.runWithRetriesAsync('saveLogsBatch', () => this.saveLogsBatchTx(payload));
+  }
+
+  private async saveLogsBatchTx(payload: SaveLogsBatchPayload): Promise<void> {
+    const { requesterMemberId, deletedLogIds, updatedLogs, newLogs } = payload;
+    if (!requesterMemberId) {
+      throw new Error('일괄 저장에는 작성자(member) id가 필요합니다.');
+    }
+
+    const pool = this.requirePool();
+    const client = await pool.connect();
+
+    const mergePersisted = (current: WorkLog, updates: Partial<WorkLog>): WorkLog => {
+      if (updates.memberId !== undefined && updates.memberId !== current.memberId) {
+        throw new Error('담당자 변경은 허용되지 않습니다.');
+      }
+      const u: WorkLog = { ...current, ...updates };
+      u.duration =
+        updates.duration !== undefined ? normalizeDurationForStorage(updates.duration) : normalizeDurationForStorage(current.duration);
+      u.count =
+        updates.count !== undefined ? normalizeCountForStorage(updates.count) : normalizeCountForStorage(current.count);
+      u.date = ensureDateYYYYMMDD(u.date);
+      return u;
+    };
+
+    try {
+      await client.query('BEGIN');
+
+      for (const delId of deletedLogIds) {
+        const row = await this.fetchWorkLogById(client, delId);
+        if (!row) throw new Error(`삭제할 업무를 찾을 수 없습니다. (id=${delId})`);
+        if (row.memberId !== requesterMemberId) throw new Error('삭제: 본인 소유 업무가 아닙니다.');
+        const dr = await client.query('DELETE FROM work_logs WHERE id = $1 AND member_id = $2', [delId, requesterMemberId]);
+        if (dr.rowCount !== 1) throw new Error(`삭제 처리 실패 (id=${delId})`);
+      }
+
+      for (const { id: uid, updates } of updatedLogs) {
+        if (!updates || Object.keys(updates).length === 0) continue;
+        const cur = await this.fetchWorkLogById(client, uid);
+        if (!cur) throw new Error(`업무 기록을 찾을 수 없습니다. (id=${uid})`);
+        if (cur.memberId !== requesterMemberId) throw new Error('수정: 본인 소유 업무가 아닙니다.');
+        const merged = mergePersisted(cur, updates);
+        const ur = await client.query(
+          `UPDATE work_logs SET member_id = $1, date = $2::date, category = $3, content = $4, issues = $5,
+                 duration = $6, count = $7, status = $8, work_indicator = $9, task_code = $10,
+                 updated_at = now()
+           WHERE id = $11 AND member_id = $12`,
+          [
+            merged.memberId,
+            merged.date,
+            merged.category,
+            merged.content,
+            merged.issues ?? null,
+            merged.duration,
+            merged.count,
+            merged.status || '완료',
+            merged.workIndicator || '기타/행정',
+            merged.taskCode ?? null,
+            uid,
+            requesterMemberId,
+          ]
+        );
+        if (ur.rowCount !== 1) throw new Error(`업무 수정에 실패했습니다. (id=${uid})`);
+      }
+
+      if (newLogs.length > 0) {
+        const ids: string[] = [];
+        const memberIds: string[] = [];
+        const dates: string[] = [];
+        const categories: string[] = [];
+        const contents: string[] = [];
+        const issues: (string | null)[] = [];
+        const durations: number[] = [];
+        const counts: number[] = [];
+        const statuses: string[] = [];
+        const workIndicators: string[] = [];
+        const taskCodes: (string | null)[] = [];
+        const createdAts: string[] = [];
+        const updatedAts: string[] = [];
+
+        const now = new Date().toISOString();
+
+        for (const log of newLogs) {
+          if (log.memberId !== requesterMemberId) {
+            throw new Error('추가: 다른 멤버 명의의 업무는 저장할 수 없습니다.');
+          }
+          ids.push(crypto.randomUUID());
+          memberIds.push(log.memberId);
+          dates.push(ensureDateYYYYMMDD(log.date));
+          categories.push(log.category);
+          contents.push(log.content);
+          issues.push(log.issues || null);
+          durations.push(normalizeDurationForStorage(log.duration));
+          counts.push(normalizeCountForStorage(log.count));
+          statuses.push(log.status || '완료');
+          workIndicators.push(log.workIndicator || '기타/행정');
+          taskCodes.push(log.taskCode || null);
+          createdAts.push(now);
+          updatedAts.push(now);
+        }
+
+        const unnestSql = `
+          INSERT INTO work_logs (id, member_id, date, category, content, issues, duration, count, status, work_indicator, task_code, created_at, updated_at)
+          SELECT * FROM UNNEST(
+            $1::text[], $2::text[], $3::date[], $4::text[], $5::text[], $6::text[],
+            $7::float8[], $8::int4[], $9::text[], $10::text[], $11::text[],
+            $12::timestamptz[], $13::timestamptz[]
+          )
+        `;
+        await client.query(unnestSql, [
+          ids, memberIds, dates, categories, contents, issues,
+          durations, counts, statuses, workIndicators, taskCodes,
+          createdAts, updatedAts
+        ]);
+      }
+
+      await client.query('COMMIT');
+    } catch (e) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        /* ignore */
+      }
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 아래: 나머지 IDatabaseAdapter API (모두 async + pg)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  private async deleteTeamCascade(client: PoolClient, teamId: string): Promise<void> {
+    const mids = await client.query<{ id: string }>('SELECT id FROM members WHERE team_id = $1', [teamId]);
+    for (const row of mids.rows) {
+      await client.query('DELETE FROM work_logs WHERE member_id = $1', [row.id]);
+      await client.query('DELETE FROM members WHERE id = $1', [row.id]);
+    }
+    await client.query('DELETE FROM teams WHERE id = $1', [teamId]);
   }
 
   async getTeams(): Promise<WorkTeam[]> {
-    const stmt = this.db!.prepare(`
-      SELECT id, name, sort_order as sortOrder,
-        admin_login_id as adminLoginId,
-        CASE WHEN admin_password_hash IS NOT NULL AND admin_password_hash != '' THEN 1 ELSE 0 END as hasPw,
-        admin_extra_json as adminExtraJson
-      FROM teams ORDER BY sort_order
-    `);
-    const rows = stmt.all() as {
-      id: string;
-      name: string;
-      sortOrder: number;
-      adminLoginId: string | null;
-      hasPw: number;
-      adminExtraJson: string | null;
-    }[];
-    return rows.map((r) => ({
-      id: r.id,
-      name: r.name,
-      sortOrder: r.sortOrder,
-      adminLoginId: r.adminLoginId ?? null,
-      hasAdminPassword: r.hasPw === 1,
-      extraAdminAccounts: toPreviewExtras(parseStoredAdminExtras(r.adminExtraJson)),
-    }));
+    return await this.runWithRetriesAsync('getTeams', async () => {
+      const r = await this.requirePool().query(
+        `
+        SELECT id, name, department, sort_order AS "sortOrder",
+          admin_login_id AS "adminLoginId",
+          CASE WHEN admin_password_hash IS NOT NULL AND admin_password_hash != '' THEN 1 ELSE 0 END AS "hasPw",
+          admin_extra_json AS "adminExtraJson"
+        FROM teams ORDER BY sort_order
+      `
+      );
+      return r.rows.map((row) => ({
+        id: row.id as string,
+        name: row.name as string,
+        department: (row.department as string | null) ?? '품질보증실',
+        sortOrder: Number(row.sortOrder),
+        adminLoginId: (row.adminLoginId as string | null) ?? null,
+        hasAdminPassword: Number(row.hasPw) === 1,
+        extraAdminAccounts: toPreviewExtras(parseStoredAdminExtras((row.adminExtraJson as string | null) ?? null)),
+      })) as WorkTeam[];
+    });
   }
 
   async insertTeam(name: string): Promise<WorkTeam> {
-    const id = crypto.randomUUID();
-    const row = this.db!.prepare('SELECT MAX(sort_order) as m FROM teams').get() as { m: number | null };
-    const sortOrder = (row?.m ?? 0) + 1;
-    this.db!.prepare('INSERT INTO teams (id, name, sort_order) VALUES (?, ?, ?)').run(id, name, sortOrder);
-    return { id, name, sortOrder, adminLoginId: null, hasAdminPassword: false };
+    return await this.runWithRetriesAsync('insertTeam', async () => {
+      const id = crypto.randomUUID();
+      const pool = this.requirePool();
+      const m = await pool.query<{ max: string | null }>('SELECT MAX(sort_order)::text AS max FROM teams');
+      const sortOrder = Number(m.rows[0]?.max ?? '0') + 1;
+      await pool.query('INSERT INTO teams (id, name, sort_order) VALUES ($1, $2, $3)', [id, name, sortOrder]);
+      return { id, name, sortOrder, adminLoginId: null, hasAdminPassword: false };
+    });
   }
 
   async verifyMasterLogin(loginId: string, password: string): Promise<boolean> {
-    const idRow = this.db!.prepare('SELECT value FROM app_settings WHERE key = ?').get('master_login_id') as
-      | { value: string }
-      | undefined;
-    if (!idRow || idRow.value !== loginId) return false;
+    const pool = this.requirePool();
+    const idRow = await pool.query<{ value: string }>('SELECT value FROM app_settings WHERE key = $1', ['master_login_id']);
+    if (!idRow.rows[0] || idRow.rows[0].value !== loginId) return false;
     const pw = (password ?? '').trim();
     if (pw === '') return true;
-    const pwRow = this.db!.prepare('SELECT value FROM app_settings WHERE key = ?').get('master_password_hash') as
-      | { value: string }
-      | undefined;
-    if (!pwRow) return false;
-    return pwRow.value === hashPassword(password);
+    const pwRow = await pool.query<{ value: string }>('SELECT value FROM app_settings WHERE key = $1', ['master_password_hash']);
+    if (!pwRow.rows[0]) return false;
+    return pwRow.rows[0].value === hashTeamlogPassword(password);
   }
 
   async verifyTeamAdmin(teamId: string, loginId: string, password: string): Promise<boolean> {
-    const hp = hashPassword(password);
+    const hp = hashTeamlogPassword(password);
+    const pool = this.requirePool();
     if (teamId === GLOBAL_TEAM_ADMIN_SCOPE_ID) {
-      const idRow = this.db!.prepare('SELECT value FROM app_settings WHERE key = ?').get('global_team_admin_login_id') as
-        | { value: string }
-        | undefined;
-      const pwRow = this.db!.prepare('SELECT value FROM app_settings WHERE key = ?').get('global_team_admin_password_hash') as
-        | { value: string }
-        | undefined;
-      if (idRow?.value?.trim() && pwRow?.value && idRow.value === loginId && pwRow.value === hp) return true;
-      const extraRow = this.db!.prepare('SELECT value FROM app_settings WHERE key = ?').get('global_team_admin_extra_json') as
-        | { value: string }
-        | undefined;
-      for (const e of parseStoredAdminExtras(extraRow?.value ?? null)) {
+      const idRow = await pool.query<{ value: string }>('SELECT value FROM app_settings WHERE key = $1', [
+        'global_team_admin_login_id',
+      ]);
+      const pwRow = await pool.query<{ value: string }>('SELECT value FROM app_settings WHERE key = $1', [
+        'global_team_admin_password_hash',
+      ]);
+      if (
+        idRow.rows[0]?.value?.trim() &&
+        pwRow.rows[0]?.value &&
+        idRow.rows[0].value === loginId &&
+        pwRow.rows[0].value === hp
+      )
+        return true;
+      const extraRow = await pool.query<{ value: string }>('SELECT value FROM app_settings WHERE key = $1', [
+        'global_team_admin_extra_json',
+      ]);
+      for (const e of parseStoredAdminExtras(extraRow.rows[0]?.value ?? null)) {
         if (e.loginId === loginId && e.passwordHash === hp) return true;
       }
       return false;
     }
-    const row = this.db!.prepare(
-      'SELECT admin_login_id, admin_password_hash, admin_extra_json FROM teams WHERE id = ?'
-    ).get(teamId) as
-      | { admin_login_id: string | null; admin_password_hash: string | null; admin_extra_json: string | null }
-      | undefined;
-    if (row?.admin_login_id && row.admin_password_hash && row.admin_login_id === loginId && row.admin_password_hash === hp)
+    const row = await pool.query<{
+      admin_login_id: string | null;
+      admin_password_hash: string | null;
+      admin_extra_json: string | null;
+    }>('SELECT admin_login_id, admin_password_hash, admin_extra_json FROM teams WHERE id = $1', [teamId]);
+    const x = row.rows[0];
+    if (!x) return false;
+    if (x.admin_login_id && x.admin_password_hash && x.admin_login_id === loginId && x.admin_password_hash === hp)
       return true;
-    for (const e of parseStoredAdminExtras(row?.admin_extra_json ?? null)) {
+    for (const e of parseStoredAdminExtras(x.admin_extra_json ?? null)) {
       if (e.loginId === loginId && e.passwordHash === hp) return true;
     }
     return false;
-  }
-
-  private deleteTeamCascade(teamId: string): void {
-    const mids = this.db!.prepare('SELECT id FROM members WHERE team_id = ?').all(teamId) as { id: string }[];
-    for (const m of mids) {
-      this.db!.prepare('DELETE FROM work_logs WHERE member_id = ?').run(m.id);
-      this.db!.prepare('DELETE FROM members WHERE id = ?').run(m.id);
-    }
-    this.db!.prepare('DELETE FROM teams WHERE id = ?').run(teamId);
   }
 
   async saveAdminTeamsTransaction(payload: {
     teams: Array<{
       id: string;
       name: string;
+      department?: string | null;
       sortOrder: number;
       adminLoginId: string;
       passwordPlain?: string | null;
@@ -736,86 +807,135 @@ export class ElectronDatabaseAdapter {
     workRecordStartDate?: string | null;
   }): Promise<void> {
     const teamExtraMerged = new Map<string, string>();
+    const pool = this.requirePool();
+
     for (const t of payload.teams) {
       if (t.extraAdmins !== undefined) {
-        const oldRow = this.db!.prepare('SELECT admin_extra_json FROM teams WHERE id = ?').get(t.id) as
-          | { admin_extra_json?: string | null }
-          | undefined;
-        const merged = await mergeAdminExtrasOnSave(oldRow?.admin_extra_json ?? null, t.extraAdmins, (pw) =>
-          Promise.resolve(hashPassword(pw))
+        const oldRow = await pool.query<{ admin_extra_json: string | null }>(
+          'SELECT admin_extra_json FROM teams WHERE id = $1',
+          [t.id]
+        );
+        const merged = await mergeAdminExtrasOnSave(oldRow.rows[0]?.admin_extra_json ?? null, t.extraAdmins, (pw) =>
+          Promise.resolve(hashTeamlogPassword(pw))
         );
         teamExtraMerged.set(t.id, serializeAdminExtras(merged));
       }
     }
     let globalExtraPrecomputed: string | undefined;
     if (payload.globalTeamAdmin && payload.globalTeamAdmin.extraAdmins !== undefined) {
-      const oldRow = this.db!.prepare('SELECT value FROM app_settings WHERE key = ?').get('global_team_admin_extra_json') as
-        | { value: string }
-        | undefined;
-      const merged = await mergeAdminExtrasOnSave(oldRow?.value ?? null, payload.globalTeamAdmin.extraAdmins, (pw) =>
-        Promise.resolve(hashPassword(pw))
+      const oldRow = await pool.query<{ value: string }>('SELECT value FROM app_settings WHERE key = $1', [
+        'global_team_admin_extra_json',
+      ]);
+      const merged = await mergeAdminExtrasOnSave(oldRow.rows[0]?.value ?? null, payload.globalTeamAdmin.extraAdmins, (pw) =>
+        Promise.resolve(hashTeamlogPassword(pw))
       );
       globalExtraPrecomputed = serializeAdminExtras(merged);
     }
 
-    const tx = this.db!.transaction(() => {
-      for (const tid of payload.deletedTeamIds) {
-        this.deleteTeamCascade(tid);
-      }
-      for (const t of payload.teams) {
-        const exists = this.db!.prepare('SELECT 1 FROM teams WHERE id = ?').get(t.id);
-        const pw = t.passwordPlain;
-        const hasNewPw = pw !== undefined && pw !== null && String(pw).length > 0;
-        const extraJson = teamExtraMerged.get(t.id);
-
-        if (exists) {
-          if (hasNewPw) {
-            if (extraJson !== undefined) {
-              this.db!
-                .prepare(
-                  `UPDATE teams SET name = ?, sort_order = ?, admin_login_id = ?, admin_password_hash = ?, admin_extra_json = ? WHERE id = ?`
-                )
-                .run(t.name, t.sortOrder, t.adminLoginId || null, hashPassword(String(pw)), extraJson, t.id);
-            } else {
-              this.db!
-                .prepare(
-                  `UPDATE teams SET name = ?, sort_order = ?, admin_login_id = ?, admin_password_hash = ? WHERE id = ?`
-                )
-                .run(t.name, t.sortOrder, t.adminLoginId || null, hashPassword(String(pw)), t.id);
-            }
-          } else if (extraJson !== undefined) {
-            this.db!
-              .prepare(
-                `UPDATE teams SET name = ?, sort_order = ?, admin_login_id = ?, admin_extra_json = ? WHERE id = ?`
-              )
-              .run(t.name, t.sortOrder, t.adminLoginId || null, extraJson, t.id);
-          } else {
-            this.db!
-              .prepare(`UPDATE teams SET name = ?, sort_order = ?, admin_login_id = ? WHERE id = ?`)
-              .run(t.name, t.sortOrder, t.adminLoginId || null, t.id);
-          }
-        } else {
-          const h = hasNewPw ? hashPassword(String(pw)) : null;
-          const insExtra = extraJson !== undefined ? extraJson : null;
-          this.db!
-            .prepare(
-              `INSERT INTO teams (id, name, sort_order, admin_login_id, admin_password_hash, admin_extra_json) VALUES (?, ?, ?, ?, ?, ?)`
-            )
-            .run(t.id, t.name, t.sortOrder, t.adminLoginId || null, h, insExtra);
+    await this.runWithRetriesAsync('saveAdminTeamsTransaction', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const tid of payload.deletedTeamIds) {
+          await this.deleteTeamCascade(client, tid);
         }
-      }
-      if (payload.globalTeamAdmin !== undefined) {
-        this.applyGlobalTeamAdminSave(payload.globalTeamAdmin, globalExtraPrecomputed);
-      }
-      if (payload.workRecordStartDate !== undefined) {
-        const raw = (payload.workRecordStartDate ?? '').trim();
-        const v = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : '';
-        this.db!
-          .prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)`)
-          .run('global_work_record_start_date', v);
+        for (const t of payload.teams) {
+          const exists = await client.query('SELECT 1 FROM teams WHERE id = $1', [t.id]);
+          const pw = t.passwordPlain;
+          const hasNewPw = pw !== undefined && pw !== null && String(pw).length > 0;
+          const extraJson = teamExtraMerged.get(t.id);
+
+          if (exists.rowCount) {
+            if (hasNewPw) {
+              if (extraJson !== undefined) {
+                await client.query(
+                  `UPDATE teams SET name = $1, department = $2, sort_order = $3, admin_login_id = $4, admin_password_hash = $5, admin_extra_json = $6 WHERE id = $7`,
+                  [t.name, t.department || '품질보증실', t.sortOrder, t.adminLoginId || null, hashTeamlogPassword(String(pw)), extraJson, t.id]
+                );
+              } else {
+                await client.query(
+                  `UPDATE teams SET name = $1, department = $2, sort_order = $3, admin_login_id = $4, admin_password_hash = $5 WHERE id = $6`,
+                  [t.name, t.department || '품질보증실', t.sortOrder, t.adminLoginId || null, hashTeamlogPassword(String(pw)), t.id]
+                );
+              }
+            } else if (extraJson !== undefined) {
+              await client.query(
+                `UPDATE teams SET name = $1, department = $2, sort_order = $3, admin_login_id = $4, admin_extra_json = $5 WHERE id = $6`,
+                [t.name, t.department || '품질보증실', t.sortOrder, t.adminLoginId || null, extraJson, t.id]
+              );
+            } else {
+              await client.query(`UPDATE teams SET name = $1, department = $2, sort_order = $3, admin_login_id = $4 WHERE id = $5`, [
+                t.name,
+                t.department || '품질보증실',
+                t.sortOrder,
+                t.adminLoginId || null,
+                t.id,
+              ]);
+            }
+          } else {
+            const h = hasNewPw ? hashTeamlogPassword(String(pw)) : null;
+            const insExtra = extraJson !== undefined ? extraJson : null;
+            await client.query(
+              `INSERT INTO teams (id, name, department, sort_order, admin_login_id, admin_password_hash, admin_extra_json) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+              [t.id, t.name, t.department || '품질보증실', t.sortOrder, t.adminLoginId || null, h, insExtra]
+            );
+          }
+        }
+        if (payload.globalTeamAdmin !== undefined) {
+          await this.applyGlobalTeamAdminSaveClient(client, payload.globalTeamAdmin, globalExtraPrecomputed);
+        }
+        if (payload.workRecordStartDate !== undefined) {
+          const raw = (payload.workRecordStartDate ?? '').trim();
+          const v = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : '';
+          await client.query(
+            `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2, now())
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+            ['global_work_record_start_date', v]
+          );
+        }
+        await client.query('COMMIT');
+      } catch (e) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          /* ignore */
+        }
+        throw e;
+      } finally {
+        client.release();
       }
     });
-    tx();
+  }
+
+  private async applyGlobalTeamAdminSaveClient(
+    client: PoolClient,
+    g: GlobalTeamAdminSavePayload,
+    precomputedExtraJson?: string
+  ): Promise<void> {
+    const ins = `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2, now())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+    if (g === null) {
+      await client.query('DELETE FROM app_settings WHERE key = ANY($1::text[])', [
+        ['global_team_admin_login_id', 'global_team_admin_password_hash', 'global_team_admin_extra_json'],
+      ]);
+      return;
+    }
+    const login = (g.adminLoginId ?? '').trim();
+    if (!login) {
+      await client.query('DELETE FROM app_settings WHERE key = ANY($1::text[])', [
+        ['global_team_admin_login_id', 'global_team_admin_password_hash', 'global_team_admin_extra_json'],
+      ]);
+      return;
+    }
+    await client.query(ins, ['global_team_admin_login_id', login]);
+    const pw = g.passwordPlain;
+    const hasNewPw = pw !== undefined && pw !== null && String(pw).length > 0;
+    if (hasNewPw) {
+      await client.query(ins, ['global_team_admin_password_hash', hashTeamlogPassword(String(pw))]);
+    }
+    if (precomputedExtraJson !== undefined) {
+      await client.query(ins, ['global_team_admin_extra_json', precomputedExtraJson]);
+    }
   }
 
   async changeAdminPasswordSelf(params: ChangeAdminPasswordSelfParams): Promise<void> {
@@ -824,224 +944,188 @@ export class ElectronDatabaseAdapter {
     if (!neu?.length) {
       throw new Error('새 비밀번호를 입력해 주세요.');
     }
+    const pool = this.requirePool();
+    const upsert = `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2, now())
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+
     if (params.scope === 'master') {
-      const idRow = this.db!.prepare('SELECT value FROM app_settings WHERE key = ?').get('master_login_id') as
-        | { value: string }
-        | undefined;
-      const pwRow = this.db!.prepare('SELECT value FROM app_settings WHERE key = ?').get('master_password_hash') as
-        | { value: string }
-        | undefined;
-      if (!idRow?.value?.trim() || !pwRow?.value) {
+      const idRow = await pool.query<{ value: string }>('SELECT value FROM app_settings WHERE key = $1', ['master_login_id']);
+      const pwRow = await pool.query<{ value: string }>('SELECT value FROM app_settings WHERE key = $1', [
+        'master_password_hash',
+      ]);
+      if (!idRow.rows[0]?.value?.trim() || !pwRow.rows[0]?.value) {
         throw new Error('마스터 계정이 설정되지 않았습니다.');
       }
-      if (pwRow.value !== hashPassword(cur)) {
+      if (pwRow.rows[0].value !== hashTeamlogPassword(cur)) {
         throw new Error('현재 비밀번호가 올바르지 않습니다.');
       }
-      this.db!
-        .prepare(
-          `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
-           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
-        )
-        .run('master_password_hash', hashPassword(neu));
+      await this.runWithRetriesAsync('changeAdminPasswordSelf.master', async () => {
+        await pool.query(upsert, ['master_password_hash', hashTeamlogPassword(neu)]);
+      });
       return;
     }
+
     if (params.scope === 'global') {
       const target = (params.adminLoginId ?? '').trim();
-      const idRow = this.db!.prepare('SELECT value FROM app_settings WHERE key = ?').get('global_team_admin_login_id') as
-        | { value: string }
-        | undefined;
-      const pwRow = this.db!.prepare('SELECT value FROM app_settings WHERE key = ?').get('global_team_admin_password_hash') as
-        | { value: string }
-        | undefined;
-      const extraRow = this.db!.prepare('SELECT value FROM app_settings WHERE key = ?').get('global_team_admin_extra_json') as
-        | { value: string }
-        | undefined;
-      const extras = parseStoredAdminExtras(extraRow?.value ?? null);
-      const curH = hashPassword(cur);
-      const neuH = hashPassword(neu);
-      const primaryId = (idRow?.value ?? '').trim();
+      const idRow = await pool.query<{ value: string }>('SELECT value FROM app_settings WHERE key = $1', [
+        'global_team_admin_login_id',
+      ]);
+      const pwRow = await pool.query<{ value: string }>('SELECT value FROM app_settings WHERE key = $1', [
+        'global_team_admin_password_hash',
+      ]);
+      const extraRow = await pool.query<{ value: string }>('SELECT value FROM app_settings WHERE key = $1', [
+        'global_team_admin_extra_json',
+      ]);
+      const extras = parseStoredAdminExtras(extraRow.rows[0]?.value ?? null);
+      const curH = hashTeamlogPassword(cur);
+      const neuH = hashTeamlogPassword(neu);
+      const primaryId = (idRow.rows[0]?.value ?? '').trim();
 
       if (!target || target === primaryId) {
-        if (!primaryId || !pwRow?.value) {
+        if (!primaryId || !pwRow.rows[0]?.value) {
           throw new Error('전체팀 관리자가 설정되지 않았습니다.');
         }
-        if (pwRow.value !== curH) {
+        if (pwRow.rows[0].value !== curH) {
           throw new Error('현재 비밀번호가 올바르지 않습니다.');
         }
-        this.db!
-          .prepare(
-            `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
-           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
-          )
-          .run('global_team_admin_password_hash', neuH);
+        await this.runWithRetriesAsync('changeAdminPasswordSelf.globalPrimary', async () => {
+          await pool.query(upsert, ['global_team_admin_password_hash', neuH]);
+        });
         return;
       }
       const idx = extras.findIndex((e) => e.loginId === target);
-      if (idx < 0) {
-        throw new Error('관리자 계정을 찾을 수 없습니다.');
-      }
-      if (extras[idx].passwordHash !== curH) {
-        throw new Error('현재 비밀번호가 올바르지 않습니다.');
-      }
+      if (idx < 0) throw new Error('관리자 계정을 찾을 수 없습니다.');
+      if (extras[idx].passwordHash !== curH) throw new Error('현재 비밀번호가 올바르지 않습니다.');
       extras[idx] = { loginId: target, passwordHash: neuH };
-      const ins = this.db!.prepare(
-        `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
-      );
-      ins.run('global_team_admin_extra_json', serializeAdminExtras(extras));
+      await this.runWithRetriesAsync('changeAdminPasswordSelf.globalExtra', async () => {
+        await pool.query(upsert, ['global_team_admin_extra_json', serializeAdminExtras(extras)]);
+      });
       return;
     }
-    const teamId = params.teamId;
-    const row = this.db!.prepare(
-      'SELECT admin_login_id, admin_password_hash, admin_extra_json FROM teams WHERE id = ?'
-    ).get(teamId) as
-      | { admin_login_id: string | null; admin_password_hash: string | null; admin_extra_json: string | null }
-      | undefined;
+
+    const teamId = params.teamId!;
+    const row = await pool.query<{
+      admin_login_id: string | null;
+      admin_password_hash: string | null;
+      admin_extra_json: string | null;
+    }>('SELECT admin_login_id, admin_password_hash, admin_extra_json FROM teams WHERE id = $1', [teamId]);
+    const x = row.rows[0];
     const target = (params.adminLoginId ?? '').trim();
-    const primaryId = (row?.admin_login_id ?? '').trim();
-    const curH = hashPassword(cur);
-    const neuH = hashPassword(neu);
+    const primaryId = (x?.admin_login_id ?? '').trim();
+    const curH = hashTeamlogPassword(cur);
+    const neuH = hashTeamlogPassword(neu);
 
     if (!target || target === primaryId) {
-      if (!primaryId || !row?.admin_password_hash) {
+      if (!primaryId || !x?.admin_password_hash) {
         throw new Error('팀 관리자가 설정되지 않았습니다. 마스터 관리자에게 사번 등록을 요청하세요.');
       }
-      if (row.admin_password_hash !== curH) {
-        throw new Error('현재 비밀번호가 올바르지 않습니다.');
-      }
-      this.db!.prepare('UPDATE teams SET admin_password_hash = ? WHERE id = ?').run(neuH, teamId);
+      if (x.admin_password_hash !== curH) throw new Error('현재 비밀번호가 올바르지 않습니다.');
+      await this.runWithRetriesAsync('changeAdminPasswordSelf.teamPrimary', async () => {
+        await pool.query('UPDATE teams SET admin_password_hash = $1 WHERE id = $2', [neuH, teamId]);
+      });
       return;
     }
-    const extras = parseStoredAdminExtras(row?.admin_extra_json ?? null);
+    const extras = parseStoredAdminExtras(x?.admin_extra_json ?? null);
     const idx = extras.findIndex((e) => e.loginId === target);
-    if (idx < 0) {
-      throw new Error('관리자 계정을 찾을 수 없습니다.');
-    }
-    if (extras[idx].passwordHash !== curH) {
-      throw new Error('현재 비밀번호가 올바르지 않습니다.');
-    }
+    if (idx < 0) throw new Error('관리자 계정을 찾을 수 없습니다.');
+    if (extras[idx].passwordHash !== curH) throw new Error('현재 비밀번호가 올바르지 않습니다.');
     extras[idx] = { loginId: target, passwordHash: neuH };
-    this.db!.prepare('UPDATE teams SET admin_extra_json = ? WHERE id = ?').run(serializeAdminExtras(extras), teamId);
+    await this.runWithRetriesAsync('changeAdminPasswordSelf.teamExtra', async () => {
+      await pool.query('UPDATE teams SET admin_extra_json = $1 WHERE id = $2', [serializeAdminExtras(extras), teamId]);
+    });
   }
 
-  private applyGlobalTeamAdminSave(g: GlobalTeamAdminSavePayload, precomputedExtraJson?: string): void {
-    const ins = this.db!.prepare(
-      `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
-    );
-    if (g === null) {
-      this.db!.prepare('DELETE FROM app_settings WHERE key IN (?, ?, ?)').run(
-        'global_team_admin_login_id',
-        'global_team_admin_password_hash',
-        'global_team_admin_extra_json'
-      );
-      return;
-    }
-    const login = (g.adminLoginId ?? '').trim();
-    if (!login) {
-      this.db!.prepare('DELETE FROM app_settings WHERE key IN (?, ?, ?)').run(
-        'global_team_admin_login_id',
-        'global_team_admin_password_hash',
-        'global_team_admin_extra_json'
-      );
-      return;
-    }
-    ins.run('global_team_admin_login_id', login);
-    const pw = g.passwordPlain;
-    const hasNewPw = pw !== undefined && pw !== null && String(pw).length > 0;
-    if (hasNewPw) {
-      ins.run('global_team_admin_password_hash', hashPassword(String(pw)));
-    }
-    if (precomputedExtraJson !== undefined) {
-      ins.run('global_team_admin_extra_json', precomputedExtraJson);
-    }
+  async getAuditLogs(limit: number = 50): Promise<import('../../src/types/workLog').AuditLog[]> {
+    return await this.runWithRetriesAsync('getAuditLogs', async () => {
+      const r = await this.requirePool().query(`
+        SELECT
+          id,
+          table_name AS "tableName",
+          operation,
+          record_id AS "recordId",
+          old_data AS "oldData",
+          new_data AS "newData",
+          changed_at AS "changedAt"
+        FROM audit_logs
+        ORDER BY changed_at DESC
+        LIMIT $1
+      `, [limit]);
+      return r.rows;
+    });
   }
 
   async getAllMembers(): Promise<TeamMember[]> {
-    const stmt = this.db!.prepare(
-      'SELECT id, name, role, avatar, status_message as statusMessage, team_id as teamId, employee_no as employeeNo FROM members ORDER BY name'
-    );
-    const rows = stmt.all() as {
-      id: string;
-      name: string;
-      role: string;
-      avatar?: string;
-      statusMessage: string | null;
-      teamId: string | null;
-      employeeNo: string | null;
-    }[];
-    return rows.map((r) => ({
-      ...r,
-      avatar: r.avatar || undefined,
-      statusMessage: r.statusMessage?.trim() ? r.statusMessage.trim() : undefined,
-      teamId: r.teamId || '',
-      employeeNo: r.employeeNo ?? undefined,
-    }));
+    return await this.runWithRetriesAsync('getAllMembers', async () => {
+      const r = await this.requirePool().query(
+        'SELECT id, name, role, avatar, status_message AS "statusMessage", team_id AS "teamId", employee_no AS "employeeNo" FROM members ORDER BY name'
+      );
+      return r.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        role: row.role,
+        avatar: row.avatar || undefined,
+        statusMessage: row.statusMessage?.trim() ? row.statusMessage.trim() : undefined,
+        teamId: row.teamId || '',
+        employeeNo: row.employeeNo ?? undefined,
+      })) as TeamMember[];
+    });
   }
 
   async getMembersByTeam(teamId: string): Promise<TeamMember[]> {
-    const stmt = this.db!.prepare(
-      'SELECT id, name, role, avatar, status_message as statusMessage, team_id as teamId, employee_no as employeeNo FROM members WHERE team_id = ? ORDER BY name'
-    );
-    const rows = stmt.all(teamId) as {
-      id: string;
-      name: string;
-      role: string;
-      avatar?: string;
-      statusMessage: string | null;
-      teamId: string | null;
-      employeeNo: string | null;
-    }[];
-    return rows.map((r) => ({
-      ...r,
-      avatar: r.avatar || undefined,
-      statusMessage: r.statusMessage?.trim() ? r.statusMessage.trim() : undefined,
-      teamId: r.teamId || teamId,
-      employeeNo: r.employeeNo ?? undefined,
-    }));
+    return await this.runWithRetriesAsync('getMembersByTeam', async () => {
+      const r = await this.requirePool().query(
+        'SELECT id, name, role, avatar, status_message AS "statusMessage", team_id AS "teamId", employee_no AS "employeeNo" FROM members WHERE team_id = $1 ORDER BY name',
+        [teamId]
+      );
+      return r.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        role: row.role,
+        avatar: row.avatar || undefined,
+        statusMessage: row.statusMessage?.trim() ? row.statusMessage.trim() : undefined,
+        teamId: row.teamId || teamId,
+        employeeNo: row.employeeNo ?? undefined,
+      })) as TeamMember[];
+    });
   }
 
   async getMemberById(id: string): Promise<TeamMember | null> {
-    const stmt = this.db!.prepare(
-      'SELECT id, name, role, avatar, status_message as statusMessage, team_id as teamId, employee_no as employeeNo FROM members WHERE id = ?'
-    );
-    const row = stmt.get(id) as
-      | {
-          id: string;
-          name: string;
-          role: string;
-          avatar?: string;
-          statusMessage: string | null;
-          teamId: string | null;
-          employeeNo: string | null;
-        }
-      | undefined;
-    return row
-      ? {
-          ...row,
-          avatar: row.avatar || undefined,
-          statusMessage: row.statusMessage?.trim() ? row.statusMessage.trim() : undefined,
-          teamId: row.teamId || '',
-          employeeNo: row.employeeNo ?? undefined,
-        }
-      : null;
+    return await this.runWithRetriesAsync('getMemberById', async () => {
+      const r = await this.requirePool().query(
+        'SELECT id, name, role, avatar, status_message AS "statusMessage", team_id AS "teamId", employee_no AS "employeeNo" FROM members WHERE id = $1',
+        [id]
+      );
+      const row = r.rows[0];
+      if (!row) return null;
+      return {
+        id: row.id,
+        name: row.name,
+        role: row.role,
+        avatar: row.avatar || undefined,
+        statusMessage: row.statusMessage?.trim() ? row.statusMessage.trim() : undefined,
+        teamId: row.teamId || '',
+        employeeNo: row.employeeNo ?? undefined,
+      } as TeamMember;
+    });
   }
 
   async insertMember(member: Omit<TeamMember, 'id'>): Promise<TeamMember> {
-    const id = crypto.randomUUID();
-    const stmt = this.db!.prepare(
-      'INSERT INTO members (id, name, role, avatar, status_message, team_id, employee_no) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    );
-    stmt.run(
-      id,
-      member.name,
-      member.role,
-      member.avatar || null,
-      member.statusMessage?.trim() ? member.statusMessage.trim() : null,
-      member.teamId,
-      member.employeeNo?.trim() ? member.employeeNo.trim() : null
-    );
-    return { id, ...member, employeeNo: member.employeeNo?.trim() || undefined };
+    return await this.runWithRetriesAsync('insertMember', async () => {
+      const id = crypto.randomUUID();
+      await this.requirePool().query(
+        'INSERT INTO members (id, name, role, avatar, status_message, team_id, employee_no) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+        [
+          id,
+          member.name,
+          member.role,
+          member.avatar || null,
+          member.statusMessage?.trim() ? member.statusMessage.trim() : null,
+          member.teamId,
+          member.employeeNo?.trim() ? member.employeeNo.trim() : null,
+        ]
+      );
+      return { id, ...member, employeeNo: member.employeeNo?.trim() || undefined };
+    });
   }
 
   async updateMember(id: string, updates: Partial<TeamMember>): Promise<void> {
@@ -1050,78 +1134,69 @@ export class ElectronDatabaseAdapter {
     const updated = { ...current, ...updates };
     const st = updated.statusMessage;
     const statusRaw = st != null && String(st).trim() !== '' ? String(st).trim() : null;
-    const stmt = this.db!.prepare(
-      "UPDATE members SET name = ?, role = ?, avatar = ?, status_message = ?, team_id = ?, employee_no = ?, updated_at = datetime('now') WHERE id = ?"
-    );
-    stmt.run(
-      updated.name,
-      updated.role,
-      updated.avatar || null,
-      statusRaw || null,
-      updated.teamId,
-      updated.employeeNo?.trim() ? updated.employeeNo.trim() : null,
-      id
-    );
+    await this.runWithRetriesAsync('updateMember', async () => {
+      await this.requirePool().query(
+        `UPDATE members SET name = $1, role = $2, avatar = $3, status_message = $4, team_id = $5, employee_no = $6, updated_at = now() WHERE id = $7`,
+        [
+          updated.name,
+          updated.role,
+          updated.avatar || null,
+          statusRaw || null,
+          updated.teamId,
+          updated.employeeNo?.trim() ? updated.employeeNo.trim() : null,
+          id,
+        ]
+      );
+    });
   }
 
   async deleteMember(id: string): Promise<void> {
-    this.db!.prepare('DELETE FROM members WHERE id = ?').run(id);
+    await this.runWithRetriesAsync('deleteMember', async () => {
+      await this.requirePool().query('DELETE FROM members WHERE id = $1', [id]);
+    });
   }
 
   async getAllLogs(): Promise<WorkLog[]> {
-    const stmt = this.db!.prepare(`
-      SELECT id, member_id as memberId, date, category, content, issues, duration, count, status,
-             work_indicator as workIndicator, task_code as taskCode,
-             created_at as createdAt, updated_at as updatedAt 
-      FROM work_logs ORDER BY date DESC, created_at DESC
-    `);
-    return stmt.all() as WorkLog[];
+    return await this.runWithRetriesAsync('getAllLogs', async () => {
+      const r = await this.requirePool().query(`${WORK_LOG_SELECT} FROM work_logs w ORDER BY w.date DESC, w.created_at DESC`);
+      return r.rows.map((row) => mapRowToWorkLog(row as Record<string, unknown>));
+    });
   }
 
   async getLogsByMemberId(memberId: string): Promise<WorkLog[]> {
-    const stmt = this.db!.prepare(`
-      SELECT id, member_id as memberId, date, category, content, issues, duration, count, status,
-             work_indicator as workIndicator, task_code as taskCode,
-             created_at as createdAt, updated_at as updatedAt
-      FROM work_logs WHERE member_id = ? ORDER BY date DESC, created_at DESC
-    `);
-    return stmt.all(memberId) as WorkLog[];
+    return await this.runWithRetriesAsync('getLogsByMemberId', async () => {
+      const r = await this.requirePool().query(
+        `${WORK_LOG_SELECT} FROM work_logs w WHERE w.member_id = $1 ORDER BY w.date DESC, w.created_at DESC`,
+        [memberId]
+      );
+      return r.rows.map((row) => mapRowToWorkLog(row as Record<string, unknown>));
+    });
   }
 
   async getLogsByDateRange(startDate: string, endDate: string): Promise<WorkLog[]> {
-    const stmt = this.db!.prepare(`
-      SELECT id, member_id as memberId, date, category, content, issues, duration, count, status,
-             work_indicator as workIndicator, task_code as taskCode,
-             created_at as createdAt, updated_at as updatedAt
-      FROM work_logs
-      WHERE strftime('%Y-%m-%d', date) >= ? AND strftime('%Y-%m-%d', date) <= ?
-      ORDER BY date DESC
-    `);
-    return stmt.all(startDate, endDate) as WorkLog[];
+    return await this.runWithRetriesAsync('getLogsByDateRange', async () => {
+      const r = await this.requirePool().query(
+        `${WORK_LOG_SELECT} FROM work_logs w
+        WHERE w.date >= $1::date AND w.date <= $2::date
+        ORDER BY w.date DESC`,
+        [startDate, endDate]
+      );
+      return r.rows.map((row) => mapRowToWorkLog(row as Record<string, unknown>));
+    });
   }
 
   async getLogsByTeam(teamId: string): Promise<WorkLog[]> {
-    const stmt = this.db!.prepare(`
-      SELECT w.id, w.member_id as memberId, w.date, w.category, w.content, w.issues, w.duration, w.count, w.status,
-             w.work_indicator as workIndicator, w.task_code as taskCode,
-             w.created_at as createdAt, w.updated_at as updatedAt
-      FROM work_logs w
-      INNER JOIN members m ON m.id = w.member_id
-      WHERE m.team_id = ?
-      ORDER BY w.date DESC, w.created_at DESC
-    `);
-    return stmt.all(teamId) as WorkLog[];
-  }
-
-  private getWorkLogById(id: string): WorkLog | null {
-    const stmt = this.db!.prepare(`
-      SELECT id, member_id as memberId, date, category, content, issues, duration, count, status,
-             work_indicator as workIndicator, task_code as taskCode,
-             created_at as createdAt, updated_at as updatedAt
-      FROM work_logs WHERE id = ?
-    `);
-    const r = stmt.get(id) as WorkLog | undefined;
-    return r ?? null;
+    return await this.runWithRetriesAsync('getLogsByTeam', async () => {
+      const r = await this.requirePool().query(
+        `${WORK_LOG_SELECT}
+        FROM work_logs w
+        INNER JOIN members m ON m.id = w.member_id
+        WHERE m.team_id = $1
+        ORDER BY w.date DESC, w.created_at DESC`,
+        [teamId]
+      );
+      return r.rows.map((row) => mapRowToWorkLog(row as Record<string, unknown>));
+    });
   }
 
   private mergePersistedLog(current: WorkLog, updates: Partial<WorkLog>): WorkLog {
@@ -1153,214 +1228,160 @@ export class ElectronDatabaseAdapter {
     const dur = normalizeDurationForStorage(log.duration);
     const cnt = normalizeCountForStorage(log.count);
     const wi = log.workIndicator || '기타/행정';
-    const stmt = this.db!.prepare(`
+    const sql = `
       INSERT INTO work_logs (id, member_id, date, category, content, issues, duration, count, status, work_indicator, task_code, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    stmt.run(
-      id,
-      log.memberId,
-      dateStr,
-      log.category,
-      log.content,
-      log.issues || null,
-      dur,
-      cnt,
-      log.status || '완료',
-      wi,
-      log.taskCode || null,
-      now,
-      now
-    );
-    return {
-      ...log,
-      id,
-      date: dateStr,
-      duration: dur,
-      count: cnt,
-      status: (log.status || '완료') as WorkLog['status'],
-      workIndicator: wi as WorkLog['workIndicator'],
-      createdAt: now,
-      updatedAt: now,
-    };
+      VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz, $13::timestamptz)
+    `;
+    return await this.runWithRetriesAsync('insertLog', async () => {
+      await this.requirePool().query(sql, [
+        id,
+        log.memberId,
+        dateStr,
+        log.category,
+        log.content,
+        log.issues || null,
+        dur,
+        cnt,
+        log.status || '완료',
+        wi,
+        log.taskCode || null,
+        now,
+        now,
+      ]);
+      return {
+        ...log,
+        id,
+        date: dateStr,
+        duration: dur,
+        count: cnt,
+        status: (log.status || '완료') as WorkLog['status'],
+        workIndicator: wi as WorkLog['workIndicator'],
+        createdAt: now,
+        updatedAt: now,
+      };
+    });
   }
 
   async updateLog(id: string, updates: Partial<WorkLog>, requesterMemberId?: string | null): Promise<void> {
     if (requesterMemberId == null || requesterMemberId === '') {
       throw new Error('업무 수정 시 작성자 검증 정보가 필요합니다.');
     }
-    const current = this.getWorkLogById(id);
-    if (!current) {
-      throw new Error(`업무 기록을 찾을 수 없습니다. (id=${id})`);
-    }
-    if (current.memberId !== requesterMemberId) {
-      throw new Error('수정: 본인 소유 업무가 아닙니다.');
-    }
+    const current = await this.fetchWorkLogById(this.requirePool(), id);
+    if (!current) throw new Error(`업무 기록을 찾을 수 없습니다. (id=${id})`);
+    if (current.memberId !== requesterMemberId) throw new Error('수정: 본인 소유 업무가 아닙니다.');
     const updated = this.mergePersistedLog(current, updates);
-    const stmt = this.db!.prepare(`
-      UPDATE work_logs SET member_id = ?, date = ?, category = ?, content = ?, issues = ?,
-             duration = ?, count = ?, status = ?, work_indicator = ?, task_code = ?,
-             updated_at = datetime('now')
-      WHERE id = ? AND member_id = ?
-    `);
-    const res = stmt.run(
-      updated.memberId,
-      updated.date,
-      updated.category,
-      updated.content,
-      updated.issues ?? null,
-      updated.duration,
-      updated.count,
-      updated.status || '완료',
-      updated.workIndicator || '기타/행정',
-      updated.taskCode ?? null,
-      id,
-      requesterMemberId
-    );
-    if (res.changes !== 1) {
-      throw new Error(`업무 수정에 실패했습니다. (id=${id})`);
-    }
+    await this.runWithRetriesAsync('updateLog', async () => {
+      const res = await this.requirePool().query(
+        `UPDATE work_logs SET member_id = $1, date = $2::date, category = $3, content = $4, issues = $5,
+             duration = $6, count = $7, status = $8, work_indicator = $9, task_code = $10,
+             updated_at = now()
+        WHERE id = $11 AND member_id = $12`,
+        [
+          updated.memberId,
+          updated.date,
+          updated.category,
+          updated.content,
+          updated.issues ?? null,
+          updated.duration,
+          updated.count,
+          updated.status || '완료',
+          updated.workIndicator || '기타/행정',
+          updated.taskCode ?? null,
+          id,
+          requesterMemberId,
+        ]
+      );
+      if (res.rowCount !== 1) throw new Error(`업무 수정에 실패했습니다. (id=${id})`);
+    });
   }
 
   async deleteLog(id: string, requesterMemberId?: string | null): Promise<void> {
     if (requesterMemberId == null || requesterMemberId === '') {
       throw new Error('업무 삭제 시 작성자 검증 정보가 필요합니다.');
     }
-    const row = this.getWorkLogById(id);
-    if (!row) {
-      throw new Error(`삭제할 업무를 찾을 수 없습니다. (id=${id})`);
-    }
-    if (row.memberId !== requesterMemberId) {
-      throw new Error('삭제: 본인 소유 업무가 아닙니다.');
-    }
-    const res = this.db!.prepare('DELETE FROM work_logs WHERE id = ? AND member_id = ?').run(id, requesterMemberId);
-    if (res.changes !== 1) {
-      throw new Error(`업무 삭제에 실패했습니다. (id=${id})`);
-    }
-  }
-
-  async saveLogsBatch(payload: SaveLogsBatchPayload): Promise<void> {
-    const { requesterMemberId, deletedLogIds, updatedLogs, newLogs } = payload;
-    if (!requesterMemberId) {
-      throw new Error('일괄 저장에는 작성자(member) id가 필요합니다.');
-    }
-    const inner = (): void => {
-      const delStmt = this.db!.prepare('DELETE FROM work_logs WHERE id = ? AND member_id = ?');
-      for (const delId of deletedLogIds) {
-        const row = this.getWorkLogById(delId);
-        if (!row) throw new Error(`삭제할 업무를 찾을 수 없습니다. (id=${delId})`);
-        if (row.memberId !== requesterMemberId) throw new Error('삭제: 본인 소유 업무가 아닙니다.');
-        const dr = delStmt.run(delId, requesterMemberId);
-        if (dr.changes !== 1) throw new Error(`삭제 처리 실패 (id=${delId})`);
-      }
-
-      const updStmt = this.db!.prepare(`
-        UPDATE work_logs SET member_id = ?, date = ?, category = ?, content = ?, issues = ?,
-               duration = ?, count = ?, status = ?, work_indicator = ?, task_code = ?,
-               updated_at = datetime('now')
-        WHERE id = ? AND member_id = ?
-      `);
-      for (const { id: uid, updates } of updatedLogs) {
-        if (!updates || Object.keys(updates).length === 0) continue;
-        const cur = this.getWorkLogById(uid);
-        if (!cur) throw new Error(`업무 기록을 찾을 수 없습니다. (id=${uid})`);
-        if (cur.memberId !== requesterMemberId) throw new Error('수정: 본인 소유 업무가 아닙니다.');
-        const merged = this.mergePersistedLog(cur, updates);
-        const ur = updStmt.run(
-          merged.memberId,
-          merged.date,
-          merged.category,
-          merged.content,
-          merged.issues ?? null,
-          merged.duration,
-          merged.count,
-          merged.status || '완료',
-          merged.workIndicator || '기타/행정',
-          merged.taskCode ?? null,
-          uid,
-          requesterMemberId
-        );
-        if (ur.changes !== 1) throw new Error(`업무 수정에 실패했습니다. (id=${uid})`);
-      }
-
-      const insStmt = this.db!.prepare(`
-        INSERT INTO work_logs (id, member_id, date, category, content, issues, duration, count, status, work_indicator, task_code, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      for (const log of newLogs) {
-        if (log.memberId !== requesterMemberId) {
-          throw new Error('추가: 다른 멤버 명의의 업무는 저장할 수 없습니다.');
-        }
-        const nid = crypto.randomUUID();
-        const now = new Date().toISOString();
-        const dateStr = ensureDateYYYYMMDD(log.date);
-        const dur = normalizeDurationForStorage(log.duration);
-        const cnt = normalizeCountForStorage(log.count);
-        const wi = log.workIndicator || '기타/행정';
-        insStmt.run(
-          nid,
-          log.memberId,
-          dateStr,
-          log.category,
-          log.content,
-          log.issues || null,
-          dur,
-          cnt,
-          log.status || '완료',
-          wi,
-          log.taskCode || null,
-          now,
-          now
-        );
-      }
-    };
-    this.db!.transaction(inner)();
+    const row = await this.fetchWorkLogById(this.requirePool(), id);
+    if (!row) throw new Error(`삭제할 업무를 찾을 수 없습니다. (id=${id})`);
+    if (row.memberId !== requesterMemberId) throw new Error('삭제: 본인 소유 업무가 아닙니다.');
+    await this.runWithRetriesAsync('deleteLog', async () => {
+      const res = await this.requirePool().query('DELETE FROM work_logs WHERE id = $1 AND member_id = $2', [
+        id,
+        requesterMemberId,
+      ]);
+      if (res.rowCount !== 1) throw new Error(`업무 삭제에 실패했습니다. (id=${id})`);
+    });
   }
 
   async deleteLogsByMemberId(memberId: string): Promise<void> {
-    this.db!.prepare('DELETE FROM work_logs WHERE member_id = ?').run(memberId);
+    await this.runWithRetriesAsync('deleteLogsByMemberId', async () => {
+      await this.requirePool().query('DELETE FROM work_logs WHERE member_id = $1', [memberId]);
+    });
   }
 
   async getCategoriesTree(): Promise<Category[]> {
-    const stmt = this.db!.prepare(
-      'SELECT id, name, parent_id as parentId, sort_order as sortOrder FROM categories ORDER BY sort_order'
-    );
-    return stmt.all() as Category[];
+    return await this.runWithRetriesAsync('getCategoriesTree', async () => {
+      const r = await this.requirePool().query(
+        'SELECT id, name, parent_id AS "parentId", sort_order AS "sortOrder" FROM categories ORDER BY sort_order'
+      );
+      return r.rows as Category[];
+    });
   }
 
   async saveCategoriesTree(categories: Category[]): Promise<void> {
-    const inner = (): void => {
-      this.db!.prepare('DELETE FROM categories').run();
-      const insert = this.db!.prepare('INSERT INTO categories (name, parent_id, sort_order) VALUES (?, ?, ?)');
-      const idMap = new Map<number, number>();
-      const roots = categories.filter((c) => c.parentId == null).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
-      const children = categories
-        .filter((c) => c.parentId != null)
-        .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
-      roots.forEach((cat, i) => {
-        const res = insert.run(cat.name, null, i + 1);
-        idMap.set(cat.id, (res as { lastInsertRowid: number }).lastInsertRowid);
-      });
-      children.forEach((cat, i) => {
-        const newParentId = idMap.get(cat.parentId!);
-        insert.run(cat.name, newParentId ?? null, i + 1);
-      });
-    };
-    this.db!.transaction(inner)();
+    await this.runWithRetriesAsync('saveCategoriesTree', async () => {
+      const pool = this.requirePool();
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('TRUNCATE categories RESTART IDENTITY CASCADE');
+        const idMap = new Map<number, number>();
+        const roots = categories.filter((c) => c.parentId == null).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+        const children = categories
+          .filter((c) => c.parentId != null)
+          .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+        for (let i = 0; i < roots.length; i++) {
+          const cat = roots[i]!;
+          const ins = await client.query<{ id: number }>(
+            'INSERT INTO categories (name, parent_id, sort_order) VALUES ($1, NULL, $2) RETURNING id',
+            [cat.name, i + 1]
+          );
+          idMap.set(cat.id, ins.rows[0]!.id);
+        }
+        for (let i = 0; i < children.length; i++) {
+          const cat = children[i]!;
+          const newParentId = idMap.get(cat.parentId!);
+          await client.query('INSERT INTO categories (name, parent_id, sort_order) VALUES ($1, $2, $3)', [
+            cat.name,
+            newParentId ?? null,
+            i + 1,
+          ]);
+        }
+        await client.query('COMMIT');
+      } catch (e) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          /* ignore */
+        }
+        throw e;
+      } finally {
+        client.release();
+      }
+    });
   }
 
-
   async getAllCategories(): Promise<string[]> {
-    const tree = await this.getCategoriesTree();
-    const byId = new Map<number, Category>();
-    tree.forEach(c => byId.set(c.id, c));
-    return tree
-      .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
-      .map(c => {
-        if (c.parentId == null) return c.name;
-        const parent = byId.get(c.parentId);
-        return parent ? `${parent.name} > ${c.name}` : c.name;
-      });
+    return await this.runWithRetriesAsync('getAllCategories', async () => {
+      const tree = await this.getCategoriesTree();
+      const byId = new Map<number, Category>();
+      tree.forEach((c) => byId.set(c.id, c));
+      return tree
+        .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+        .map((c) => {
+          if (c.parentId == null) return c.name;
+          const parent = byId.get(c.parentId);
+          return parent ? `${parent.name} > ${c.name}` : c.name;
+        });
+    });
   }
 
   async saveCategories(categories: string[]): Promise<void> {
@@ -1385,22 +1406,26 @@ export class ElectronDatabaseAdapter {
   }
 
   async getSetting(key: string): Promise<string | null> {
-    const stmt = this.db!.prepare('SELECT value FROM app_settings WHERE key = ?');
-    const result = stmt.get(key) as { value: string } | undefined;
-    return result?.value || null;
+    const r = await this.requirePool().query('SELECT value FROM app_settings WHERE key = $1', [key]);
+    return r.rows[0]?.value ?? null;
   }
 
   async setSetting(key: string, value: string): Promise<void> {
-    const stmt = this.db!.prepare(`
-      INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
-    `);
-    stmt.run(key, value);
+    await this.runWithRetriesAsync('setSetting', async () => {
+      await this.requirePool().query(
+        `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2, now())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+        [key, value]
+      );
+    });
   }
 
   async clearAllData(): Promise<void> {
-    this.db!.prepare('DELETE FROM work_logs').run();
-    this.db!.prepare('DELETE FROM members').run();
+    await this.runWithRetriesAsync('clearAllData', async () => {
+      const p = this.requirePool();
+      await p.query('DELETE FROM work_logs');
+      await p.query('DELETE FROM members');
+    });
   }
 
   async exportData(): Promise<{ teams: WorkTeam[]; members: TeamMember[]; logs: WorkLog[]; categories: string[] }> {
@@ -1419,15 +1444,16 @@ export class ElectronDatabaseAdapter {
       admin_password_hash: string | null;
       admin_extra_json: string | null;
     };
+    const pool = this.requirePool();
     const adminSnap = new Map<string, TeamAdminSnap>();
     try {
-      const rows = this.db!.prepare('SELECT id, admin_login_id, admin_password_hash, admin_extra_json FROM teams').all() as Array<{
+      const rows = await pool.query<{
         id: string;
         admin_login_id: string | null;
         admin_password_hash: string | null;
         admin_extra_json: string | null;
-      }>;
-      for (const r of rows) {
+      }>('SELECT id, admin_login_id, admin_password_hash, admin_extra_json FROM teams');
+      for (const r of rows.rows) {
         adminSnap.set(r.id, {
           admin_login_id: r.admin_login_id ?? null,
           admin_password_hash: r.admin_password_hash ?? null,
@@ -1435,74 +1461,167 @@ export class ElectronDatabaseAdapter {
         });
       }
     } catch {
-      /* teams 테이블 없음 등 */
+      /* ignore */
     }
 
-    await this.clearAllData();
-    if (data.teams && data.teams.length > 0) {
-      this.db!.prepare('DELETE FROM teams').run();
-      const insTeam = this.db!.prepare(
-        'INSERT INTO teams (id, name, sort_order, admin_login_id, admin_password_hash, admin_extra_json) VALUES (?, ?, ?, ?, ?, ?)'
-      );
-      for (const t of data.teams) {
-        const preserve = shouldPreserveImportedTeamAdmin(t);
-        const snap = adminSnap.get(t.id);
-        let adminId: string | null;
-        let adminHash: string | null;
-        let adminExtra: string | null;
-        if (preserve && snap) {
-          adminId = snap.admin_login_id;
-          adminHash = snap.admin_password_hash;
-          adminExtra = snap.admin_extra_json;
+    await this.runWithRetriesAsync('importData', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('DELETE FROM work_logs');
+        await client.query('DELETE FROM members');
+        if (data.teams && data.teams.length > 0) {
+          await client.query('DELETE FROM teams');
+          for (const t of data.teams) {
+            const preserve = shouldPreserveImportedTeamAdmin(t);
+            const snap = adminSnap.get(t.id);
+            let adminId: string | null;
+            let adminHash: string | null;
+            let adminExtra: string | null;
+            if (preserve && snap) {
+              adminId = snap.admin_login_id;
+              adminHash = snap.admin_password_hash;
+              adminExtra = snap.admin_extra_json;
+            } else {
+              adminId = (t.adminLoginId ?? '').trim() || null;
+              adminHash = null;
+              adminExtra = null;
+            }
+            await client.query(
+              'INSERT INTO teams (id, name, sort_order, admin_login_id, admin_password_hash, admin_extra_json) VALUES ($1, $2, $3, $4, $5, $6)',
+              [t.id, t.name, t.sortOrder, adminId, adminHash, adminExtra]
+            );
+          }
         } else {
-          adminId = (t.adminLoginId ?? '').trim() || null;
-          adminHash = null;
-          adminExtra = null;
+          await this.ensureDefaultTeams(client);
         }
-        insTeam.run(t.id, t.name, t.sortOrder, adminId, adminHash, adminExtra);
+        await this.importMembersAndLogsClient(client, data);
+        await this.saveCategoriesWithClient(client, data.categories);
+        await client.query('COMMIT');
+      } catch (e) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          /* ignore */
+        }
+        throw e;
+      } finally {
+        client.release();
       }
-    } else {
-      this.ensureDefaultTeams();
+    });
+  }
+
+  private async importMembersAndLogsClient(
+    client: PoolClient,
+    data: { members: TeamMember[]; logs: WorkLog[] }
+  ): Promise<void> {
+    if (data.members.length > 0) {
+      const ids: string[] = [];
+      const names: string[] = [];
+      const roles: string[] = [];
+      const avatars: (string | null)[] = [];
+      const statusMsgs: (string | null)[] = [];
+      const teamIds: string[] = [];
+      const employeeNos: (string | null)[] = [];
+      for (const m of data.members) {
+        ids.push(m.id);
+        names.push(m.name);
+        roles.push(m.role);
+        avatars.push(m.avatar || null);
+        statusMsgs.push(m.statusMessage?.trim() ? m.statusMessage.trim() : null);
+        teamIds.push(m.teamId || TEAM_QG2_ID);
+        employeeNos.push(m.employeeNo?.trim() ? m.employeeNo.trim() : null);
+      }
+      await client.query(`
+        INSERT INTO members (id, name, role, avatar, status_message, team_id, employee_no)
+        SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
+      `, [ids, names, roles, avatars, statusMsgs, teamIds, employeeNos]);
     }
-    const insertMember = this.db!.prepare(
-      'INSERT INTO members (id, name, role, avatar, status_message, team_id, employee_no) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    );
-    for (const m of data.members) {
-      const tid = m.teamId || TEAM_QG2_ID;
-      insertMember.run(
-        m.id,
-        m.name,
-        m.role,
-        m.avatar || null,
-        m.statusMessage?.trim() ? m.statusMessage.trim() : null,
-        tid,
-        m.employeeNo?.trim() ? m.employeeNo.trim() : null
+
+    if (data.logs.length > 0) {
+      const ids: string[] = [];
+      const memberIds: string[] = [];
+      const dates: string[] = [];
+      const categories: string[] = [];
+      const contents: string[] = [];
+      const issues: (string | null)[] = [];
+      const durations: number[] = [];
+      const counts: number[] = [];
+      const statuses: string[] = [];
+      const workIndicators: string[] = [];
+      const taskCodes: (string | null)[] = [];
+      const createdAts: string[] = [];
+      const updatedAts: string[] = [];
+
+      for (const l of data.logs) {
+        ids.push(l.id);
+        memberIds.push(l.memberId);
+        dates.push(ensureDateYYYYMMDD(l.date));
+        categories.push(l.category);
+        contents.push(l.content);
+        issues.push(l.issues ?? null);
+        durations.push(clampDurationForImport(l.duration));
+        counts.push(clampCountForImport(l.count));
+        statuses.push(l.status || '완료');
+        workIndicators.push(l.workIndicator || '기타/행정');
+        taskCodes.push(l.taskCode ?? null);
+        createdAts.push(l.createdAt);
+        updatedAts.push(l.updatedAt);
+      }
+
+      await client.query(`
+        INSERT INTO work_logs (id, member_id, date, category, content, issues, duration, count, status, work_indicator, task_code, created_at, updated_at)
+        SELECT * FROM UNNEST(
+          $1::text[], $2::text[], $3::date[], $4::text[], $5::text[], $6::text[],
+          $7::float8[], $8::int4[], $9::text[], $10::text[], $11::text[],
+          $12::timestamptz[], $13::timestamptz[]
+        )
+      `, [
+        ids, memberIds, dates, categories, contents, issues,
+        durations, counts, statuses, workIndicators, taskCodes,
+        createdAts, updatedAts
+      ]);
+    }
+  }
+
+  private async saveCategoriesWithClient(client: PoolClient, categories: string[]): Promise<void> {
+    const tree: Category[] = [];
+    const parentNames = new Map<string, number>();
+    let nextId = 1;
+    categories.forEach((displayName, idx) => {
+      if (displayName.includes(' > ')) {
+        const [parentName, childName] = displayName.split(' > ');
+        let parentId = parentNames.get(parentName!);
+        if (parentId == null) {
+          parentId = nextId++;
+          tree.push({ id: parentId, name: parentName!, parentId: null, sortOrder: tree.length + 1 });
+          parentNames.set(parentName!, parentId);
+        }
+        tree.push({ id: nextId++, name: childName!.trim(), parentId, sortOrder: tree.length + 1 });
+      } else {
+        tree.push({ id: nextId++, name: displayName, parentId: null, sortOrder: idx + 1 });
+      }
+    });
+    await client.query('TRUNCATE categories RESTART IDENTITY CASCADE');
+    const idMap = new Map<number, number>();
+    const roots = tree.filter((c) => c.parentId == null).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+    const children = tree.filter((c) => c.parentId != null).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+    for (let i = 0; i < roots.length; i++) {
+      const cat = roots[i]!;
+      const ins = await client.query<{ id: number }>(
+        'INSERT INTO categories (name, parent_id, sort_order) VALUES ($1, NULL, $2) RETURNING id',
+        [cat.name, i + 1]
       );
+      idMap.set(cat.id, ins.rows[0]!.id);
     }
-    const insertLog = this.db!.prepare(`
-      INSERT INTO work_logs (id, member_id, date, category, content, issues, duration, count, status, work_indicator, task_code, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    for (const l of data.logs) {
-      const dur = clampDurationForImport(l.duration);
-      const cnt = clampCountForImport(l.count);
-      const wi = l.workIndicator || '기타/행정';
-      insertLog.run(
-        l.id,
-        l.memberId,
-        ensureDateYYYYMMDD(l.date),
-        l.category,
-        l.content,
-        l.issues ?? null,
-        dur,
-        cnt,
-        l.status || '완료',
-        wi,
-        l.taskCode ?? null,
-        l.createdAt,
-        l.updatedAt
-      );
+    for (let i = 0; i < children.length; i++) {
+      const cat = children[i]!;
+      const newParentId = idMap.get(cat.parentId!);
+      await client.query('INSERT INTO categories (name, parent_id, sort_order) VALUES ($1, $2, $3)', [
+        cat.name,
+        newParentId ?? null,
+        i + 1,
+      ]);
     }
-    await this.saveCategories(data.categories);
   }
 }

@@ -1,4 +1,5 @@
 import type { TeamMember } from '@/types/workLog';
+import { getLastLoginEmployee } from '@/utils/sessionKeys';
 
 /** 팀원 목록 한 줄·다이얼로그에 맞춘 상태메시지 최대 글자수 */
 export const MEMBER_STATUS_MESSAGE_MAX = 20;
@@ -21,6 +22,11 @@ function parseBaseline(raw: string | null): Record<string, string> {
   }
 }
 
+function getProfileStorageKey(teamId: string): string {
+  const loginId = getLastLoginEmployee() || 'unknown';
+  return `${STORAGE_PREFIX}${loginId}_${teamId}`;
+}
+
 /**
  * "마지막으로 팀원 목록을 닫았을 때" 본 프로필 서명을 팀별로 저장합니다.
  * `localStorage`를 써서 계정을 바꿔 로그인해도 이전에 본 상태와 비교할 수 있습니다.
@@ -28,7 +34,7 @@ function parseBaseline(raw: string | null): Record<string, string> {
  */
 export function readProfileBaseline(teamId: string): Record<string, string> {
   if (!teamId || typeof window === 'undefined') return {};
-  const key = `${STORAGE_PREFIX}${teamId}`;
+  const key = getProfileStorageKey(teamId);
   try {
     const fromLs = localStorage.getItem(key);
     if (fromLs != null) return parseBaseline(fromLs);
@@ -47,7 +53,7 @@ export function readProfileBaseline(teamId: string): Record<string, string> {
 function writeProfileBaseline(teamId: string, map: Record<string, string>): void {
   if (!teamId || typeof window === 'undefined') return;
   try {
-    localStorage.setItem(`${STORAGE_PREFIX}${teamId}`, JSON.stringify(map));
+    localStorage.setItem(getProfileStorageKey(teamId), JSON.stringify(map));
   } catch {
     /* quota / private mode */
   }
@@ -81,7 +87,10 @@ export function memberHasProfilePing(
 ): boolean {
   const sig = memberProfileSignature(member);
   const prev = baseline[member.id];
-  if (prev === undefined) return false;
+  if (prev === undefined) {
+    // 저장된 스냅샷이 없다면(첫 로그인 등), 기본 프로필이 아닌 경우에만 알림 표시
+    return sig !== '\u001f';
+  }
   return prev !== sig;
 }
 

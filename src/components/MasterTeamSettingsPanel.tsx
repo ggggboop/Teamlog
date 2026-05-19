@@ -16,25 +16,19 @@ import { dataService } from '@/services/DataService';
 import { MIN_REQUIRED_VERSION_SETTING_KEY } from '@/constants/versionPolicy';
 import { APP_VERSION } from '@/constants/appVersion';
 
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+
 interface TeamDraft {
   id: string;
   name: string;
+  department: string;
   sortOrder: number;
 }
 
-interface AdminRowEntry {
+interface UnifiedAdminRow {
   rowKey: string;
-  teamId: string;
-  isPrimary: boolean;
-  adminLoginId: string;
-  passwordPlain: string;
-  /** DB에 비밀번호 해시가 있음(화면에는 비우고 안내만) */
-  hasStoredPassword?: boolean;
-}
-
-interface GlobalAdminRow {
-  rowKey: string;
-  isPrimary: boolean;
+  role: 'director' | 'manager';
+  teamId?: string; // Manager일 경우 소속 팀 ID
   adminLoginId: string;
   passwordPlain: string;
   hasStoredPassword?: boolean;
@@ -49,6 +43,7 @@ interface MasterTeamSettingsPanelProps {
     teams: Array<{
       id: string;
       name: string;
+      department: string;
       sortOrder: number;
       adminLoginId: string;
       passwordPlain?: string | null;
@@ -70,77 +65,82 @@ function toTeamDrafts(teams: WorkTeam[]): TeamDraft[] {
     .map((t) => ({
       id: t.id,
       name: t.name,
+      department: t.department || '품질보증실',
       sortOrder: t.sortOrder,
     }));
 }
 
-function buildAdminEntries(teams: WorkTeam[]): AdminRowEntry[] {
-  const sorted = [...teams].sort((a, b) => a.sortOrder - b.sortOrder);
-  const out: AdminRowEntry[] = [];
-  for (const t of sorted) {
-    out.push({
-      rowKey: `p-${t.id}`,
-      teamId: t.id,
-      isPrimary: true,
-      adminLoginId: t.adminLoginId ?? '',
-      passwordPlain: '',
-      hasStoredPassword: !!t.hasAdminPassword,
-    });
-    let i = 0;
-    for (const ex of t.extraAdminAccounts ?? []) {
-      out.push({
-        rowKey: `e-${t.id}-${ex.loginId ?? i}`,
-        teamId: t.id,
-        isPrimary: false,
-        adminLoginId: ex.loginId ?? '',
-        passwordPlain: '',
-        hasStoredPassword: ex.hasPassword,
-      });
-      i += 1;
-    }
-  }
-  return out;
-}
-
-/** DB에 비밀번호만 있고 이 브라우저 캐시가 없을 때 빈 칸 대신 표시(실제 비밀번호 아님) */
-const MASTER_ADMIN_PASSWORD_MASK = '••••••••';
-
-function masterAdminPasswordDisplayValue(
-  passwordPlain: string,
-  rowKey: string,
-  committed: Record<string, string>,
-  hasStoredPassword?: boolean
-): string {
-  const fromCommitted = committed[rowKey]?.trim();
-  const plain = passwordPlain.trim();
-  if (plain) return passwordPlain;
-  if (fromCommitted) return committed[rowKey] ?? '';
-  if (hasStoredPassword) return MASTER_ADMIN_PASSWORD_MASK;
-  return '';
-}
-
-function buildGlobalRows(gp: GlobalTeamAdminPreview): GlobalAdminRow[] {
-  const rows: GlobalAdminRow[] = [
-    {
+function buildUnifiedAdminRows(teams: WorkTeam[], globalPreview: GlobalTeamAdminPreview): UnifiedAdminRow[] {
+  const rows: UnifiedAdminRow[] = [];
+  
+  // Director (Global)
+  if (globalPreview.adminLoginId || globalPreview.hasPassword) {
+    rows.push({
       rowKey: 'g-p',
-      isPrimary: true,
-      adminLoginId: gp.adminLoginId ?? '',
+      role: 'director',
+      adminLoginId: globalPreview.adminLoginId ?? '',
       passwordPlain: '',
-      hasStoredPassword: gp.hasPassword,
-    },
-  ];
+      hasStoredPassword: globalPreview.hasPassword,
+    });
+  }
   let i = 0;
-  for (const ex of gp.extraAccounts ?? []) {
+  for (const ex of globalPreview.extraAccounts ?? []) {
     rows.push({
       rowKey: `g-${ex.loginId ?? i}`,
-      isPrimary: false,
+      role: 'director',
       adminLoginId: ex.loginId ?? '',
       passwordPlain: '',
       hasStoredPassword: ex.hasPassword,
     });
     i += 1;
   }
+
+  // Manager (Team)
+  const sorted = [...teams].sort((a, b) => a.sortOrder - b.sortOrder);
+  for (const t of sorted) {
+    if (t.adminLoginId || t.hasAdminPassword) {
+      rows.push({
+        rowKey: `p-${t.id}`,
+        role: 'manager',
+        teamId: t.id,
+        adminLoginId: t.adminLoginId ?? '',
+        passwordPlain: '',
+        hasStoredPassword: !!t.hasAdminPassword,
+      });
+    }
+    let j = 0;
+    for (const ex of t.extraAdminAccounts ?? []) {
+      rows.push({
+        rowKey: `e-${t.id}-${ex.loginId ?? j}`,
+        role: 'manager',
+        teamId: t.id,
+        adminLoginId: ex.loginId ?? '',
+        passwordPlain: '',
+        hasStoredPassword: ex.hasPassword,
+      });
+      j += 1;
+    }
+  }
+  
   return rows;
+}
+
+/** DB에 비밀번호만 있고 이 브라우저 캐시가 없을 때 빈 칸 대신 표시할 텍스트 */
+const MASTER_ADMIN_PASSWORD_MASK = '(설정됨)';
+
+function masterAdminPasswordDisplayValue(
+  passwordPlain: string,
+  rowKey: string,
+  committed: Record<string, string>,
+  hasStoredPassword?: boolean,
+  stableKey?: string
+): string {
+  const targetKey = stableKey || rowKey;
+  const fromCommitted = committed[targetKey]?.trim();
+  const plain = passwordPlain.trim();
+  if (plain) return passwordPlain;
+  if (fromCommitted) return committed[targetKey] ?? '';
+  return '';
 }
 
 export function MasterTeamSettingsPanel({
@@ -152,8 +152,7 @@ export function MasterTeamSettingsPanel({
   onResetOperationalData,
 }: MasterTeamSettingsPanelProps) {
   const [teamDrafts, setTeamDrafts] = useState<TeamDraft[]>([]);
-  const [adminRowEntries, setAdminRowEntries] = useState<AdminRowEntry[]>([]);
-  const [globalRows, setGlobalRows] = useState<GlobalAdminRow[]>([]);
+  const [unifiedAdminRows, setUnifiedAdminRows] = useState<UnifiedAdminRow[]>([]);
   const [deletedIds, setDeletedIds] = useState<Set<string>>(new Set());
   const [initialTeamIds, setInitialTeamIds] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
@@ -178,16 +177,12 @@ export function MasterTeamSettingsPanel({
 
   useEffect(() => {
     setTeamDrafts(toTeamDrafts(teams));
-    setAdminRowEntries(buildAdminEntries(teams));
+    setUnifiedAdminRows(buildUnifiedAdminRows(teams, globalTeamAdminPreview));
     setDeletedIds(new Set());
     setInitialTeamIds(new Set(teams.map((t) => t.id)));
     setError('');
-  }, [teams]);
-
-  useEffect(() => {
-    setGlobalRows(buildGlobalRows(globalTeamAdminPreview));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- globalPreviewKey으로 서버 동기화 시점만 갱신
-  }, [globalPreviewKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teams, globalPreviewKey]);
 
   /** 팀·전체팀 관리자 행이 바뀔 때 localStorage 캐시를 입력란 상태로 복원 */
   const masterPanelHydrateKey = useMemo(
@@ -206,9 +201,8 @@ export function MasterTeamSettingsPanel({
 
   useEffect(() => {
     const cache = loadMasterPanelPasswordCache();
-    const serverEntries = buildAdminEntries(teams);
-    const globals = buildGlobalRows(globalTeamAdminPreview);
-    const baseKeys = new Set([...serverEntries.map((e) => e.rowKey), ...globals.map((r) => r.rowKey)]);
+    const serverEntries = buildUnifiedAdminRows(teams, globalTeamAdminPreview);
+    const baseKeys = new Set(serverEntries.map((e) => e.rowKey));
     setCommittedPlainByRow((prev) => {
       const next = { ...prev };
       for (const k of baseKeys) {
@@ -221,6 +215,45 @@ export function MasterTeamSettingsPanel({
   useEffect(() => {
     setWorkRecordStartInput(workRecordStartDate ?? '');
   }, [workRecordStartDate]);
+
+  const [departments, setDepartments] = useState<string[]>(['품질보증실']);
+  const [selectedDepartment, setSelectedDepartment] = useState<string>('품질보증실');
+  const [newDepartmentName, setNewDepartmentName] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const raw = await dataService.getSetting('global_departments_json');
+        if (!cancelled && raw) {
+          try {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              setDepartments(parsed);
+              setSelectedDepartment(prev => parsed.includes(prev) ? prev : parsed[0]);
+              return;
+            }
+          } catch (e) {
+            // ignore
+          }
+        }
+        
+        // Fallback: extract from teams
+        if (!cancelled) {
+          const deps = new Set(teams.map(t => t.department || '품질보증실'));
+          if (!deps.has('품질보증실')) deps.add('품질보증실');
+          const arr = Array.from(deps);
+          setDepartments(arr);
+          setSelectedDepartment(prev => arr.includes(prev) ? prev : arr[0]);
+        }
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [teams]);
 
   useEffect(() => {
     let cancelled = false;
@@ -243,12 +276,39 @@ export function MasterTeamSettingsPanel({
   }, [teamDrafts]);
 
   const addTeam = () => {
+    if (!selectedDepartment) {
+      toast.error('부서를 먼저 선택하거나 추가해주세요.');
+      return;
+    }
     const id = crypto.randomUUID();
-    setTeamDrafts((prev) => [...prev, { id, name: '새 팀', sortOrder: nextSortOrder }]);
-    setAdminRowEntries((prev) => [
-      ...prev,
-      { rowKey: `p-${id}`, teamId: id, isPrimary: true, adminLoginId: '', passwordPlain: '', hasStoredPassword: false },
-    ]);
+    setTeamDrafts((prev) => [...prev, { id, name: '새 팀', department: selectedDepartment, sortOrder: nextSortOrder }]);
+  };
+
+  const addDepartment = () => {
+    const trimmed = newDepartmentName.trim();
+    if (!trimmed) return;
+    if (departments.includes(trimmed)) {
+      toast.error('이미 존재하는 부서입니다.');
+      return;
+    }
+    setDepartments(prev => [...prev, trimmed]);
+    setNewDepartmentName('');
+    setSelectedDepartment(trimmed);
+  };
+
+  const removeDepartment = (dept: string) => {
+    const hasTeams = teamDrafts.some(t => t.department === dept && !deletedIds.has(t.id));
+    if (hasTeams) {
+      toast.error('이 부서에 속한 팀이 있어 삭제할 수 없습니다. 팀을 먼저 이동하거나 삭제하세요.');
+      return;
+    }
+    setDepartments(prev => {
+      const next = prev.filter(d => d !== dept);
+      if (selectedDepartment === dept) {
+        setSelectedDepartment(next[0] || '');
+      }
+      return next;
+    });
   };
 
   const removeTeam = (id: string) => {
@@ -256,43 +316,33 @@ export function MasterTeamSettingsPanel({
       setDeletedIds((prev) => new Set(prev).add(id));
     }
     setTeamDrafts((prev) => prev.filter((d) => d.id !== id));
-    setAdminRowEntries((prev) => prev.filter((r) => r.teamId !== id));
+    setUnifiedAdminRows((prev) => prev.filter((r) => r.teamId !== id));
   };
 
   const updateTeamDraft = (id: string, patch: Partial<TeamDraft>) => {
     setTeamDrafts((prev) => prev.map((d) => (d.id === id ? { ...d, ...patch } : d)));
   };
 
-  const updateAdminEntry = (rowKey: string, patch: Partial<AdminRowEntry>) => {
-    setAdminRowEntries((prev) => prev.map((r) => (r.rowKey === rowKey ? { ...r, ...patch } : r)));
-  };
-
-  const addExtraTeamAdmin = (teamId: string) => {
-    setAdminRowEntries((prev) => {
-      let last = -1;
-      for (let i = 0; i < prev.length; i++) {
-        if (prev[i].teamId === teamId) last = i;
-      }
-      if (last < 0) return prev;
-      const next = [...prev];
-      next.splice(last + 1, 0, {
-        rowKey: `n-${crypto.randomUUID()}`,
-        teamId,
-        isPrimary: false,
+  const addAdminRow = () => {
+    setUnifiedAdminRows((prev) => [
+      ...prev,
+      {
+        rowKey: `new-${crypto.randomUUID()}`,
+        role: 'manager',
+        teamId: sortedTeams[0]?.id ?? '',
         adminLoginId: '',
         passwordPlain: '',
         hasStoredPassword: false,
-      });
-      return next;
-    });
+      },
+    ]);
   };
 
-  const removeAdminEntry = (rowKey: string) => {
-    setAdminRowEntries((prev) => prev.filter((r) => r.rowKey !== rowKey));
+  const updateAdminRow = (rowKey: string, patch: Partial<UnifiedAdminRow>) => {
+    setUnifiedAdminRows((prev) => prev.map((r) => (r.rowKey === rowKey ? { ...r, ...patch } : r)));
   };
 
-  const updateGlobalRow = (rowKey: string, patch: Partial<GlobalAdminRow>) => {
-    setGlobalRows((prev) => prev.map((r) => (r.rowKey === rowKey ? { ...r, ...patch } : r)));
+  const removeAdminRow = (rowKey: string) => {
+    setUnifiedAdminRows((prev) => prev.filter((r) => r.rowKey !== rowKey));
   };
 
   const stripCommittedForRow = (rowKey: string) => {
@@ -304,9 +354,9 @@ export function MasterTeamSettingsPanel({
     });
   };
 
-  const setTeamPasswordField = (rowKey: string, value: string) => {
+  const setAdminPasswordField = (rowKey: string, value: string) => {
     stripCommittedForRow(rowKey);
-    setAdminRowEntries((prev) => {
+    setUnifiedAdminRows((prev) => {
       const entry = prev.find((r) => r.rowKey === rowKey);
       let v = value;
       if (entry) {
@@ -318,39 +368,6 @@ export function MasterTeamSettingsPanel({
       }
       return prev.map((r) => (r.rowKey === rowKey ? { ...r, passwordPlain: v } : r));
     });
-  };
-
-  const setGlobalPasswordField = (rowKey: string, value: string) => {
-    stripCommittedForRow(rowKey);
-    setGlobalRows((prev) => {
-      const row = prev.find((r) => r.rowKey === rowKey);
-      let v = value;
-      if (row) {
-        const plain = row.passwordPlain.trim();
-        if (v === MASTER_ADMIN_PASSWORD_MASK && !plain) v = '';
-        else if (!plain && row.hasStoredPassword && v.startsWith(MASTER_ADMIN_PASSWORD_MASK)) {
-          v = v.slice(MASTER_ADMIN_PASSWORD_MASK.length);
-        }
-      }
-      return prev.map((r) => (r.rowKey === rowKey ? { ...r, passwordPlain: v } : r));
-    });
-  };
-
-  const addGlobalExtra = () => {
-    setGlobalRows((prev) => [
-      ...prev,
-      {
-        rowKey: `g-n-${crypto.randomUUID()}`,
-        isPrimary: false,
-        adminLoginId: '',
-        passwordPlain: '',
-        hasStoredPassword: false,
-      },
-    ]);
-  };
-
-  const removeGlobalRow = (rowKey: string) => {
-    setGlobalRows((prev) => prev.filter((r) => r.rowKey !== rowKey));
   };
 
   const handleSave = async () => {
@@ -366,11 +383,8 @@ export function MasterTeamSettingsPanel({
         }
       }
 
-      const byTeam = new Map<string, AdminRowEntry[]>();
-      for (const e of adminRowEntries) {
-        if (!byTeam.has(e.teamId)) byTeam.set(e.teamId, []);
-        byTeam.get(e.teamId)!.push(e);
-      }
+      const directors = unifiedAdminRows.filter((r) => r.role === 'director');
+      const managers = unifiedAdminRows.filter((r) => r.role === 'manager');
 
       const payloadTeams: Array<{
         id: string;
@@ -382,9 +396,9 @@ export function MasterTeamSettingsPanel({
       }> = [];
 
       for (const t of activeTeams) {
-        const list = byTeam.get(t.id) ?? [];
-        const primary = list.find((x) => x.isPrimary);
-        const extras = list.filter((x) => !x.isPrimary);
+        const teamManagers = managers.filter((m) => m.teamId === t.id);
+        const primary = teamManagers[0];
+        const extras = teamManagers.slice(1);
         const pLogin = (primary?.adminLoginId ?? '').trim();
         const extraPayload: AdminExtraAccountPayload[] = extras.map((x) => ({
           adminLoginId: x.adminLoginId.trim(),
@@ -399,6 +413,7 @@ export function MasterTeamSettingsPanel({
         payloadTeams.push({
           id: t.id,
           name: t.name.trim(),
+          department: t.department,
           sortOrder: t.sortOrder,
           adminLoginId: pLogin,
           passwordPlain: primary?.passwordPlain?.trim() ? primary.passwordPlain : undefined,
@@ -406,8 +421,8 @@ export function MasterTeamSettingsPanel({
         });
       }
 
-      const gPrimary = globalRows.find((r) => r.isPrimary);
-      const gExtras = globalRows.filter((r) => !r.isPrimary);
+      const gPrimary = directors[0];
+      const gExtras = directors.slice(1);
       const gLogin = (gPrimary?.adminLoginId ?? '').trim();
       const rawGlobalPw = gPrimary?.passwordPlain ?? '';
       const gExtraPayload: AdminExtraAccountPayload[] = gExtras.map((x) => ({
@@ -416,7 +431,7 @@ export function MasterTeamSettingsPanel({
       }));
       const gAllIds = [gLogin, ...gExtraPayload.map((e) => e.adminLoginId)].filter(Boolean);
       if (new Set(gAllIds).size !== gAllIds.length) {
-        setError('전체팀 관리자 사번이 중복되었습니다.');
+        setError('Director 사번이 중복되었습니다.');
         setSaving(false);
         return;
       }
@@ -428,13 +443,11 @@ export function MasterTeamSettingsPanel({
       };
 
       const plainSnapshot: Record<string, string> = {};
-      for (const e of adminRowEntries) {
+      for (const e of unifiedAdminRows) {
         const t = e.passwordPlain.trim();
-        if (t) plainSnapshot[e.rowKey] = t;
-      }
-      for (const r of globalRows) {
-        const t = r.passwordPlain.trim();
-        if (t) plainSnapshot[r.rowKey] = t;
+        if (t) {
+          plainSnapshot[e.rowKey] = t;
+        }
       }
 
       await onSave({
@@ -443,18 +456,12 @@ export function MasterTeamSettingsPanel({
         globalTeamAdmin,
         workRecordStartDate: workRecordStartInput.trim() || null,
       });
+      await dataService.setSetting('global_departments_json', JSON.stringify(departments));
       if (Object.keys(plainSnapshot).length > 0) {
         mergeMasterPanelPasswordCache(plainSnapshot);
         setCommittedPlainByRow((p) => ({ ...p, ...plainSnapshot }));
       }
-      setAdminRowEntries((prev) =>
-        prev.map((e) => ({
-          ...e,
-          passwordPlain: '',
-          hasStoredPassword: e.passwordPlain.trim() ? true : e.hasStoredPassword,
-        }))
-      );
-      setGlobalRows((prev) =>
+      setUnifiedAdminRows((prev) =>
         prev.map((e) => ({
           ...e,
           passwordPlain: '',
@@ -505,55 +512,151 @@ export function MasterTeamSettingsPanel({
           <div>
             <h3 className="text-sm font-semibold flex items-center gap-2 text-[#1e293b]">
               <Users className="w-5 h-5 text-primary shrink-0" />
-              팀 설정
+              부서 및 팀 설정
             </h3>
             <p className="text-xs text-[#64748b] mt-1.5 leading-relaxed">
-              삭제한 팀의 팀원·기록은 저장 시 함께 정리됩니다.
+              왼쪽에서 부서를 선택하고, 오른쪽에서 해당 부서의 팀을 관리하세요. 삭제한 팀의 팀원·기록은 저장 시 함께 정리됩니다.
             </p>
           </div>
 
-          <div>
-            <p className="text-xs font-medium text-[#64748b] mb-2">팀 이름</p>
-            <div className="rounded-xl border border-black/[0.08] bg-secondary/10 divide-y divide-border/60 overflow-hidden">
-              {sortedTeams.length === 0 ? (
-                <p className="px-3 py-6 text-sm text-muted-foreground text-center">
-                  등록된 팀이 없습니다. 아래에서 추가하세요.
-                </p>
-              ) : (
-                sortedTeams.map((team, index) => (
-                  <div key={team.id} className="flex items-center gap-1.5 px-2 py-1.5 sm:px-3 bg-white/80">
+          <div className="flex flex-col md:flex-row gap-4 min-h-[300px]">
+            {/* 부서 목록 */}
+            <div className="w-full md:w-1/3 flex flex-col gap-2">
+              <p className="text-xs font-medium text-[#64748b]">부서 목록</p>
+              <div className="flex-1 rounded-xl border border-black/[0.08] bg-secondary/10 flex flex-col overflow-hidden">
+                <div className="flex-1 overflow-y-auto p-2 space-y-1">
+                  {departments.length === 0 ? (
+                    <p className="px-3 py-6 text-sm text-muted-foreground text-center">
+                      등록된 부서가 없습니다.
+                    </p>
+                  ) : (
+                    departments.map((dept) => (
+                      <div
+                        key={dept}
+                        className={cn(
+                          "flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer transition-colors",
+                          selectedDepartment === dept
+                            ? "bg-primary text-primary-foreground font-medium shadow-sm"
+                            : "hover:bg-black/5 text-[#1e293b]"
+                        )}
+                        onClick={() => setSelectedDepartment(dept)}
+                      >
+                        <span className="truncate">{dept}</span>
+                        {selectedDepartment === dept && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 shrink-0 text-primary-foreground/70 hover:text-white hover:bg-black/20"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeDepartment(dept);
+                            }}
+                            title="부서 삭제"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+                <div className="p-2 border-t border-black/[0.08] bg-white/50">
+                  <div className="flex items-center gap-1.5">
                     <Input
-                      value={team.name}
-                      onChange={(e) => updateTeamDraft(team.id, { name: e.target.value })}
-                      className="h-9 flex-1 min-w-0 border-0 bg-transparent shadow-none focus-visible:ring-1 focus-visible:ring-primary/30 rounded-lg px-2 text-base"
-                      placeholder={`팀 ${index + 1}`}
+                      value={newDepartmentName}
+                      onChange={(e) => setNewDepartmentName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          addDepartment();
+                        }
+                      }}
+                      className="h-8 text-sm bg-white"
+                      placeholder="새 부서명"
                     />
                     <Button
                       type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="h-9 w-9 shrink-0 text-destructive hover:bg-destructive/10"
-                      onClick={() => removeTeam(team.id)}
-                      title="팀 삭제"
+                      size="sm"
+                      className="h-8 px-2"
+                      onClick={addDepartment}
                     >
-                      <Trash2 className="h-4 w-4" />
+                      <Plus className="h-4 w-4" />
                     </Button>
                   </div>
-                ))
-              )}
+                </div>
+              </div>
+            </div>
+
+            {/* 팀 목록 */}
+            <div className="w-full md:w-2/3 flex flex-col gap-2">
+              <p className="text-xs font-medium text-[#64748b]">
+                {selectedDepartment ? `「${selectedDepartment}」 소속 팀` : '팀 목록'}
+              </p>
+              <div className="flex-1 rounded-xl border border-black/[0.08] bg-secondary/10 flex flex-col overflow-hidden">
+                <div className="flex-1 overflow-y-auto p-2 space-y-1">
+                  {!selectedDepartment ? (
+                    <p className="px-3 py-6 text-sm text-muted-foreground text-center">
+                      부서를 먼저 선택해주세요.
+                    </p>
+                  ) : sortedTeams.filter(t => t.department === selectedDepartment).length === 0 ? (
+                    <p className="px-3 py-6 text-sm text-muted-foreground text-center">
+                      이 부서에 등록된 팀이 없습니다. 아래에서 추가하세요.
+                    </p>
+                  ) : (
+                    sortedTeams
+                      .filter(t => t.department === selectedDepartment)
+                      .map((team, index) => (
+                        <div key={team.id} className="flex items-center gap-1.5 px-2 py-1.5 sm:px-3 bg-white/80 rounded-lg border border-black/[0.04] shadow-sm">
+                          <Input
+                            value={team.name}
+                            onChange={(e) => updateTeamDraft(team.id, { name: e.target.value })}
+                            className="h-9 flex-1 min-w-0 border-0 bg-transparent shadow-none focus-visible:ring-1 focus-visible:ring-primary/30 rounded-lg px-2 text-base"
+                            placeholder={`팀 ${index + 1}`}
+                          />
+                          <Select
+                            value={team.department}
+                            onValueChange={(v) => updateTeamDraft(team.id, { department: v })}
+                          >
+                            <SelectTrigger className="w-[120px] h-9 bg-transparent border-0 shadow-none focus:ring-1 focus:ring-primary/30">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {departments.map(d => (
+                                <SelectItem key={d} value={d}>{d}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-9 w-9 shrink-0 text-destructive hover:bg-destructive/10"
+                            onClick={() => removeTeam(team.id)}
+                            title="팀 삭제"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      ))
+                  )}
+                </div>
+                <div className="p-2 border-t border-black/[0.08] bg-white/50">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="w-full rounded-lg border-dashed border-primary/35 py-2 text-primary hover:bg-primary/5"
+                    onClick={addTeam}
+                    disabled={!selectedDepartment}
+                  >
+                    <Plus className="mr-1.5 h-4 w-4" />
+                    팀 추가
+                  </Button>
+                </div>
+              </div>
             </div>
           </div>
-
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="w-full rounded-xl border-dashed border-primary/35 py-2.5 text-primary hover:bg-primary/5"
-            onClick={addTeam}
-          >
-            <Plus className="mr-1.5 h-4 w-4" />
-            팀 추가
-          </Button>
         </section>
 
         <section className="worklog-day-card flex flex-col p-5 space-y-4">
@@ -653,134 +756,119 @@ export function MasterTeamSettingsPanel({
             <table className="w-full min-w-[560px] text-sm sm:text-base">
               <thead>
                 <tr className="bg-muted/50 text-left text-xs font-medium text-[#64748b]">
-                  <th className="px-3 py-2 w-[26%]">관리 범위</th>
-                  <th className="px-3 py-2 w-[32%]">관리자 사번</th>
+                  <th className="px-3 py-2 w-[35%]">등급 및 소속</th>
+                  <th className="px-3 py-2 w-[25%]">관리자 사번</th>
                   <th className="px-3 py-2">비밀번호 (변경 시)</th>
-                  <th className="px-2 py-2 w-[88px] text-center"> </th>
+                  <th className="px-2 py-2 w-[60px] text-center"> </th>
                 </tr>
               </thead>
               <tbody>
-                {adminRowEntries.map((entry) => {
-                  const team = sortedTeams.find((x) => x.id === entry.teamId);
-                  if (!team) return null;
-                  const baseName = team.name.trim() || '(이름 없음)';
-                  const scopeLabel = entry.isPrimary ? `${baseName} (주)` : `${baseName} (추가)`;
+                {unifiedAdminRows.map((entry) => {
+                  const displayVal = masterAdminPasswordDisplayValue(
+                    entry.passwordPlain,
+                    entry.rowKey,
+                    committedPlainByRow,
+                    entry.hasStoredPassword,
+                    entry.rowKey
+                  );
+                  const showMask = entry.hasStoredPassword && !displayVal;
+
                   return (
                     <tr key={entry.rowKey} className="border-t border-border/60">
-                      <td className="px-3 py-2 align-middle font-medium text-[#1e293b]">{scopeLabel}</td>
+                      <td className="px-3 py-2 align-middle">
+                        <div className="flex items-center gap-2">
+                          <Select
+                            value={entry.role}
+                            onValueChange={(v) =>
+                              updateAdminRow(entry.rowKey, {
+                                role: v as 'director' | 'manager',
+                                teamId: v === 'manager' ? (entry.teamId || sortedTeams[0]?.id || '') : undefined,
+                              })
+                            }
+                          >
+                            <SelectTrigger className="w-[110px] h-9 bg-white">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="director">Director</SelectItem>
+                              <SelectItem value="manager">Manager</SelectItem>
+                            </SelectContent>
+                          </Select>
+
+                          {entry.role === 'manager' && (
+                            <Select
+                              value={entry.teamId}
+                              onValueChange={(v) => updateAdminRow(entry.rowKey, { teamId: v })}
+                            >
+                              <SelectTrigger className="w-[130px] h-9 bg-white">
+                                <SelectValue placeholder="팀 선택" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {sortedTeams.map((t) => (
+                                  <SelectItem key={t.id} value={t.id}>
+                                    {t.name}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-3 py-1.5 align-middle">
                         <Input
                           value={entry.adminLoginId}
-                          onChange={(e) => updateAdminEntry(entry.rowKey, { adminLoginId: e.target.value })}
-                          className="h-9 rounded-lg border-black/[0.08] text-base"
+                          onChange={(e) => updateAdminRow(entry.rowKey, { adminLoginId: e.target.value })}
+                          className="h-9 rounded-lg border-black/[0.08] text-base bg-white"
                           placeholder="사번"
                           autoComplete="username"
                         />
                       </td>
                       <td className="px-3 py-1.5 align-middle">
                         <PasswordInputWithToggle
-                          value={masterAdminPasswordDisplayValue(
-                            entry.passwordPlain,
-                            entry.rowKey,
-                            committedPlainByRow,
-                            entry.hasStoredPassword
-                          )}
-                          onChange={(v) => setTeamPasswordField(entry.rowKey, v)}
-                          inputClassName="h-9 rounded-lg border-black/[0.08] text-base"
+                          value={displayVal}
+                          onChange={(v) => setAdminPasswordField(entry.rowKey, v)}
+                          inputClassName="h-9 rounded-lg border-black/[0.08] text-base bg-white"
                           placeholder={
-                            entry.hasStoredPassword || committedPlainByRow[entry.rowKey]
-                              ? ''
-                              : entry.isPrimary
-                                ? '저장 시 비밀번호 설정'
-                                : '추가 관리자 최초 비밀번호'
+                            showMask ? MASTER_ADMIN_PASSWORD_MASK : '비밀번호 설정'
                           }
                           autoComplete="new-password"
                         />
                       </td>
                       <td className="px-1 py-1.5 align-middle text-center">
-                        {entry.isPrimary ? (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="h-8 text-xs text-primary"
-                            onClick={() => addExtraTeamAdmin(entry.teamId)}
-                          >
-                            + 추가
-                          </Button>
-                        ) : (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 text-destructive hover:bg-destructive/10"
-                            onClick={() => removeAdminEntry(entry.rowKey)}
-                            title="이 추가 관리자 삭제"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-                {globalRows.map((row) => (
-                  <tr key={row.rowKey} className={cn('border-t border-border/60', 'bg-primary/[0.04]')}>
-                    <td className="px-3 py-2 align-middle font-semibold text-primary">
-                      {row.isPrimary ? '전체팀 (주)' : '전체팀 (추가)'}
-                    </td>
-                    <td className="px-3 py-1.5 align-middle">
-                      <Input
-                        value={row.adminLoginId}
-                        onChange={(e) => updateGlobalRow(row.rowKey, { adminLoginId: e.target.value })}
-                        className="h-9 rounded-lg border-black/[0.08] text-base"
-                        placeholder="사번"
-                        autoComplete="username"
-                      />
-                    </td>
-                    <td className="px-3 py-1.5 align-middle">
-                      <PasswordInputWithToggle
-                        value={masterAdminPasswordDisplayValue(
-                          row.passwordPlain,
-                          row.rowKey,
-                          committedPlainByRow,
-                          row.hasStoredPassword
-                        )}
-                        onChange={(v) => setGlobalPasswordField(row.rowKey, v)}
-                        inputClassName="h-9 rounded-lg border-black/[0.08] text-base"
-                        placeholder={
-                          row.hasStoredPassword || committedPlainByRow[row.rowKey]
-                            ? ''
-                            : row.isPrimary
-                              ? '최초 설정 시 필수'
-                              : '추가 최초 시 필수'
-                        }
-                        autoComplete="new-password"
-                      />
-                    </td>
-                    <td className="px-1 py-1.5 align-middle text-center">
-                      {row.isPrimary ? (
-                        <Button type="button" variant="ghost" size="sm" className="h-8 text-xs text-primary" onClick={addGlobalExtra}>
-                          + 추가
-                        </Button>
-                      ) : (
                         <Button
                           type="button"
                           variant="ghost"
                           size="icon"
                           className="h-8 w-8 text-destructive hover:bg-destructive/10"
-                          onClick={() => removeGlobalRow(row.rowKey)}
-                          title="이 추가 관리자 삭제"
+                          onClick={() => removeAdminRow(entry.rowKey)}
+                          title="삭제"
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>
-                      )}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {unifiedAdminRows.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="px-3 py-6 text-center text-sm text-muted-foreground">
+                      등록된 관리자가 없습니다.
                     </td>
                   </tr>
-                ))}
+                )}
               </tbody>
             </table>
           </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="w-full rounded-xl border-dashed border-primary/35 py-2.5 text-primary hover:bg-primary/5"
+            onClick={addAdminRow}
+          >
+            <Plus className="mr-1.5 h-4 w-4" />
+            관리자 추가
+          </Button>
         </section>
 
         {(onGenerateSampleData || onResetOperationalData) && (

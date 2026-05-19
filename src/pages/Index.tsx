@@ -16,6 +16,7 @@ import { PersonalStatsDialog } from '@/components/PersonalStatsDialog';
 import { AdminDashboard, type AdminDashboardTab, type AdminShellTab } from '@/components/AdminDashboard';
 import { AdminPasswordDialog } from '@/components/AdminPasswordDialog';
 import { MasterTeamSettingsPanel } from '@/components/MasterTeamSettingsPanel';
+import { AuditLogsPanel } from '@/components/AuditLogsPanel';
 import { LoginScreen } from '@/components/LoginScreen';
 import { getStoredTeamId, setStoredTeamId, clearStoredTeamId } from '@/utils/sessionKeys';
 import { useDataService } from '@/hooks/useDataService';
@@ -137,7 +138,7 @@ const Index = () => {
     const id = initSelectedTeamId();
     const r = initSessionRole();
     if (!id) return false;
-    if (r === 'master') return true;
+    if (r === 'master' || r === 'director') return true;
     if (r !== 'admin') return false;
     return getTeamAdminOk(id);
   });
@@ -147,7 +148,7 @@ const Index = () => {
       setTeamAdminOkLocal(false);
       return;
     }
-    if (sessionRole === 'master') {
+    if (sessionRole === 'master' || sessionRole === 'director') {
       setTeamAdminOkLocal(true);
       return;
     }
@@ -163,7 +164,7 @@ const Index = () => {
     Boolean(selectedTeamId) && sessionRole === 'admin' && !teamAdminOk;
 
   const adminSidebarDisabled =
-    sessionRole === 'writer' || (sessionRole === 'admin' && !teamAdminOk);
+    sessionRole === 'writer' || ((sessionRole === 'admin' || sessionRole === 'director') && !teamAdminOk);
 
   const handleLoginWriterComplete = (member: TeamMember) => {
     setSessionRole('writer');
@@ -175,7 +176,7 @@ const Index = () => {
     setTeamAdminOkLocal(false);
   };
 
-  const handleLoginAdminComplete = (payload: { teamId: string; role: 'admin' | 'master' }) => {
+  const handleLoginAdminComplete = (payload: { teamId: string; role: 'admin' | 'director' | 'master' }) => {
     setSessionRole(payload.role);
     setSessionRoleState(payload.role);
     setStoredTeamId(payload.teamId);
@@ -183,7 +184,7 @@ const Index = () => {
     setTeamAdminOk(payload.teamId, true);
     setTeamAdminOkLocal(true);
     setSelectedMember(null);
-    setIsAdminView(true);
+    setIsAdminView(payload.role === 'master');
     setAdminShellTab('admin_home');
   };
 
@@ -360,7 +361,7 @@ const Index = () => {
       setStoredTeamId(teamId);
       setSelectedTeamId(teamId);
       setSelectedMember(null);
-      if (sessionRole === 'master') {
+      if (sessionRole === 'master' || sessionRole === 'director') {
         setTeamAdminOkLocal(true);
         return;
       }
@@ -457,7 +458,9 @@ const Index = () => {
         />
 
         <main className="flex-1 overflow-hidden worklog-main-surface">
-          {isAdminView && adminShellTab === 'master' ? (
+          {isAdminView && adminShellTab === 'audit' ? (
+            <AuditLogsPanel />
+          ) : isAdminView && adminShellTab === 'master' ? (
             <MasterTeamSettingsPanel
               teams={teams}
               globalTeamAdminPreview={globalTeamAdminPreview}

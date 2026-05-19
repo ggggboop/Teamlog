@@ -15,6 +15,7 @@ interface AdminPasswordSettingsTabProps {
   teams: WorkTeam[];
   globalTeamAdminPreview: GlobalTeamAdminPreview;
   onChangePassword: (params: ChangeAdminPasswordSelfParams) => Promise<void>;
+  sessionRole?: 'admin' | 'director' | 'master' | 'writer' | null;
 }
 
 export function AdminPasswordSettingsTab({
@@ -22,6 +23,7 @@ export function AdminPasswordSettingsTab({
   teams: teamsProp,
   globalTeamAdminPreview: gpProp,
   onChangePassword,
+  sessionRole,
 }: AdminPasswordSettingsTabProps) {
   const teams = teamsProp ?? [];
   const globalTeamAdminPreview = gpProp ?? { adminLoginId: null as string | null, hasPassword: false };
@@ -34,7 +36,7 @@ export function AdminPasswordSettingsTab({
   /** 팀·전체팀 관리자 전용 (마스터 계정은 마스터 관리 화면에서 다룸) */
   const { mode, teamId, loginIdDisplay, scopeLabel, sessionLoginId, canChange } = useMemo(() => {
     const session = (getLastLoginEmployee() ?? '').trim();
-    if (selectedTeamId === GLOBAL_TEAM_ADMIN_SCOPE_ID) {
+    if (sessionRole === 'director' || selectedTeamId === GLOBAL_TEAM_ADMIN_SCOPE_ID) {
       const primary = (globalTeamAdminPreview.adminLoginId ?? '').trim();
       const extraOk = (globalTeamAdminPreview.extraAccounts ?? []).some(
         (e) => (e.loginId ?? '').trim() === session && e.hasPassword
@@ -44,7 +46,7 @@ export function AdminPasswordSettingsTab({
         mode: 'global' as const,
         teamId: undefined as string | undefined,
         loginIdDisplay: ok ? session : primary || null,
-        scopeLabel: '전체팀 관리자',
+        scopeLabel: 'Director',
         sessionLoginId: session,
         canChange: !!ok,
       };
@@ -59,11 +61,11 @@ export function AdminPasswordSettingsTab({
       mode: 'team' as const,
       teamId: selectedTeamId ?? undefined,
       loginIdDisplay: ok ? session : primary || null,
-      scopeLabel: t ? `${t.name} 관리자` : '팀 관리자',
+      scopeLabel: t ? `${t.name} Manager` : 'Manager',
       sessionLoginId: session,
       canChange: !!ok,
     };
-  }, [selectedTeamId, teams, globalTeamAdminPreview]);
+  }, [selectedTeamId, teams, globalTeamAdminPreview, sessionRole]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -117,7 +119,7 @@ export function AdminPasswordSettingsTab({
           <div>
             <h2 className="text-xl font-semibold tracking-tight text-[#1e293b]">관리자 설정</h2>
             <p className="text-sm text-muted-foreground">
-              {scopeLabel} 계정의 비밀번호를 변경합니다. 관리자 사번은 마스터 관리자만 등록·변경할 수 있습니다.
+              {scopeLabel} 계정의 비밀번호를 변경합니다. 관리자 사번은 Master만 등록·변경할 수 있습니다.
             </p>
           </div>
         </div>
@@ -137,7 +139,7 @@ export function AdminPasswordSettingsTab({
 
           {!canChange ? (
             <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200/80 rounded-xl px-3 py-2">
-              마스터 관리에서 관리자 사번이 등록된 뒤 비밀번호를 변경할 수 있습니다.
+              Master 관리에서 관리자 사번이 등록된 뒤 비밀번호를 변경할 수 있습니다.
             </p>
           ) : (
             <form onSubmit={handleSubmit} className="space-y-4">

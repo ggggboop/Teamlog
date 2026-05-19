@@ -1,9 +1,19 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import path from 'path';
 import fs from 'fs';
-import { ElectronDatabaseAdapter } from './database/ElectronDatabaseAdapter';
+import { pathToFileURL } from 'url';
+import { ElectronDatabaseAdapter, getPgConnectionSummary } from './database/ElectronDatabaseAdapter';
+import {
+  getPgSettingsForUi,
+  mergeSavePgToSettings,
+  mergePgConnectionFromDiskAndEnv,
+  formatPgConnectionError,
+  testPgConnectionRaw,
+  type PgConnectionConfig,
+} from './database/pgSettingsStorage';
 import type { Category, WorkLog, TeamMember, WorkTeam } from '../src/types/workLog';
 import type { SaveLogsBatchPayload } from '../src/services/DatabaseAdapter';
+import type { ChangeAdminPasswordSelfParams } from '../src/constants/adminPasswordChange';
 import { MIN_REQUIRED_VERSION_SETTING_KEY } from '../src/constants/versionPolicy';
 import { versionLessThan } from '../src/utils/semverLite';
 
@@ -12,36 +22,39 @@ declare const __TEAMLOG_PACKAGE_VERSION__: string | undefined;
 let mainWindow: BrowserWindow | null = null;
 let dbAdapter: ElectronDatabaseAdapter | null = null;
 
-function getSettingsPath(): string {
-  return path.join(app.getPath('userData'), 'settings.json');
-}
-
-function loadSavedDbPath(): string | null {
-  try {
-    const settingsPath = getSettingsPath();
-    if (fs.existsSync(settingsPath)) {
-      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-      return settings.dbPath || null;
-    }
-  } catch {
-    // ignore
-  }
-  return null;
-}
-
-function saveDbPath(dbPath: string): void {
-  const settingsPath = getSettingsPath();
-  const dir = path.dirname(settingsPath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  fs.writeFileSync(settingsPath, JSON.stringify({ dbPath }));
+function resolvePgFormToConfig(body: {
+  host: string;
+  port: number;
+  user: string;
+  database: string;
+  password?: string;
+}): PgConnectionConfig {
+  const merged = mergePgConnectionFromDiskAndEnv();
+  const pwd = (body.password ?? '').trim();
+  return {
+    host: (body.host ?? '').trim() || merged.host,
+    port: Number.isFinite(Number(body.port)) ? Number(body.port) : merged.port,
+    user: (body.user ?? '').trim() || merged.user,
+    database: (body.database ?? '').trim() || merged.database,
+    password: pwd !== '' ? pwd : merged.password,
+  };
 }
 
 async function getAdapter(): Promise<ElectronDatabaseAdapter> {
   if (!dbAdapter) {
-    dbAdapter = new ElectronDatabaseAdapter();
-    await dbAdapter.initialize();
+    const inst = new ElectronDatabaseAdapter();
+    try {
+      await inst.initialize();
+      inst.onChange((payload) => {
+        if (mainWindow) {
+          mainWindow.webContents.send('db:changed', payload);
+        }
+      });
+      dbAdapter = inst;
+    } catch (e) {
+      await inst.close().catch(() => {});
+      throw e;
+    }
   }
   return dbAdapter;
 }
@@ -74,48 +87,77 @@ try {
 }
 console.log('[Teamlog] 패키지 버전 (package.json):', TEAMLOG_RUNTIME_PACKAGE_VERSION);
 
-// DB 경로 관련 IPC
-ipcMain.handle('db:getDbPath', () => loadSavedDbPath());
+// PostgreSQL: 연결 요약 표시(레거시 UI의 "DB 경로" 자리). 파일 선택 IPC는 미사용(null).
+ipcMain.handle('db:getDbPath', () => {
+  try {
+    if (dbAdapter?.isConnected()) return dbAdapter.getConnectionSummary();
+    return getPgConnectionSummary();
+  } catch {
+    return null;
+  }
+});
 
 ipcMain.handle('db:selectDbFile', async () => {
-  const result = await dialog.showOpenDialog(mainWindow!, {
-    title: 'DB 파일 선택 (공유 폴더 경로 가능)',
-    properties: ['openFile'],
-    filters: [
-      { name: 'SQLite Database', extensions: ['db', 'sqlite', 'sqlite3'] },
-      { name: 'All Files', extensions: ['*'] },
-    ],
+  await dialog.showMessageBox(mainWindow!, {
+    type: 'info',
+    title: 'PostgreSQL 연결',
+    message: 'Teamlog는 PostgreSQL을 사용합니다.',
+    detail: `userData/settings.json의 "pg" 항목(PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE) 또는 환경 변수로 연결을 설정하세요.\n현재 설정 요약:\n${getPgConnectionSummary()}`,
   });
-  if (!result.canceled && result.filePaths.length > 0) {
-    const selectedPath = result.filePaths[0];
-    saveDbPath(selectedPath);
-    if (dbAdapter) {
-      await dbAdapter.setDbPath(selectedPath);
-    }
-    return selectedPath;
-  }
   return null;
 });
 
 ipcMain.handle('db:createNewDb', async () => {
-  const result = await dialog.showSaveDialog(mainWindow!, {
-    title: '새 DB 파일 생성',
-    defaultPath: 'team-worklog.db',
-    filters: [
-      { name: 'SQLite Database', extensions: ['db'] },
-      { name: 'All Files', extensions: ['*'] },
-    ],
+  await dialog.showMessageBox(mainWindow!, {
+    type: 'info',
+    title: 'PostgreSQL',
+    message: '데이터베이스와 사용자는 PostgreSQL 서버에서 미리 생성해야 합니다.',
+    detail: `앱은 기존 DB에 스키마만 적용합니다.\n${getPgConnectionSummary()}`,
   });
-  if (!result.canceled && result.filePath) {
-    const filePath = result.filePath.endsWith('.db') ? result.filePath : `${result.filePath}.db`;
-    saveDbPath(filePath);
-    if (dbAdapter) {
-      await dbAdapter.setDbPath(filePath);
-    }
-    return filePath;
-  }
   return null;
 });
+
+ipcMain.handle('pg:getSettingsForUi', () => getPgSettingsForUi());
+
+ipcMain.handle(
+  'pg:testConnection',
+  async (
+    _e,
+    body: { host: string; port: number; user: string; database: string; password?: string }
+  ): Promise<{ ok: true } | { ok: false; errorMessage: string }> => {
+    const cfg = resolvePgFormToConfig(body);
+    return testPgConnectionRaw(cfg);
+  }
+);
+
+ipcMain.handle(
+  'pg:saveAndReinit',
+  async (
+    _e,
+    body: { host: string; port: number; user: string; database: string; password?: string }
+  ): Promise<{ ok: true } | { ok: false; error: string }> => {
+    try {
+      const toSave: PgConnectionConfig = {
+        host: (body.host ?? '').trim(),
+        port: Number(body.port),
+        user: (body.user ?? '').trim(),
+        database: (body.database ?? '').trim(),
+        password: (body.password ?? '').trim(),
+      };
+      mergeSavePgToSettings(toSave);
+      if (dbAdapter) {
+        await dbAdapter.close().catch(() => {});
+        dbAdapter = null;
+      }
+      await getAdapter();
+      return { ok: true };
+    } catch (e) {
+      const msg = formatPgConnectionError(e);
+      console.error('[pg:saveAndReinit] 재연결 실패');
+      return { ok: false, error: msg };
+    }
+  }
+);
 
 // DataService IPC 핸들러
 /** DB 초기화 후 최소 요구 버전과 비교 (DB 미연결 시 차단하지 않음) */
@@ -214,7 +256,7 @@ ipcMain.handle(
     }
   ) => {
     const adapter = await getAdapter();
-    return adapter.changeAdminPasswordSelf(params);
+    return adapter.changeAdminPasswordSelf(params as ChangeAdminPasswordSelfParams);
   }
 );
 
@@ -226,6 +268,11 @@ ipcMain.handle('db:getMembersByTeam', async (_e, teamId: string) => {
 ipcMain.handle('db:getLogsByTeam', async (_e, teamId: string) => {
   const adapter = await getAdapter();
   return adapter.getLogsByTeam(teamId);
+});
+
+ipcMain.handle('db:getAuditLogs', async (_e, limit?: number) => {
+  const adapter = await getAdapter();
+  return adapter.getAuditLogs(limit);
 });
 
 ipcMain.handle('db:getMemberById', async (_e, id: string) => {
@@ -361,7 +408,7 @@ async function createWindow() {
 
   // 패키징/개발 모두 지원: app.getAppPath()가 app 루트 반환
   const indexPath = path.join(app.getAppPath(), 'dist', 'index.html');
-  mainWindow.loadFile(indexPath);
+  void mainWindow.loadURL(pathToFileURL(indexPath).href);
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -369,6 +416,21 @@ async function createWindow() {
 }
 
 app.whenReady().then(createWindow);
+
+let appIsQuitting = false;
+app.on('before-quit', (e) => {
+  if (appIsQuitting || !dbAdapter) return;
+  e.preventDefault();
+  appIsQuitting = true;
+  const adapter = dbAdapter;
+  dbAdapter = null;
+  void adapter
+    .close()
+    .catch(() => {})
+    .finally(() => {
+      app.quit();
+    });
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {

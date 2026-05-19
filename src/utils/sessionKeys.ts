@@ -46,13 +46,13 @@ export function clearStoredTeamId(): void {
   }
 }
 
-/** 팀 선택 화면에서는 writer·admin만 쓰고, 마스터는 관리자 게이트에서 마스터 인증 시 부여됩니다. */
-export type StoredSessionRole = 'writer' | 'admin' | 'master';
+/** 팀 선택 화면에서는 writer·admin·director만 쓰고, 마스터는 관리자 게이트에서 마스터 인증 시 부여됩니다. */
+export type StoredSessionRole = 'writer' | 'admin' | 'director' | 'master';
 
 export function getSessionRole(): StoredSessionRole | null {
   try {
     const v = localStorage.getItem(SESSION_ROLE_KEY);
-    if (v === 'writer' || v === 'admin' || v === 'master') return v;
+    if (v === 'writer' || v === 'admin' || v === 'director' || v === 'master') return v as StoredSessionRole;
   } catch {
     /* ignore */
   }

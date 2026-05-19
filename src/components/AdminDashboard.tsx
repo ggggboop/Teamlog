@@ -66,7 +66,7 @@ export type AdminDashboardTab =
   | 'management_admin_settings';
 
 /** 관리자 셸(사이드바): 대시보드 탭 + 마스터 전용 탭 */
-export type AdminShellTab = AdminDashboardTab | 'master';
+export type AdminShellTab = AdminDashboardTab | 'master' | 'audit';
 
 type WorkIndicatorCountMap = Record<WorkIndicatorType, number>;
 
@@ -555,6 +555,7 @@ export function AdminDashboard({
             teams={teams}
             globalTeamAdminPreview={globalTeamAdminPreview ?? { adminLoginId: null, hasPassword: false }}
             onChangePassword={onChangeAdminPassword}
+            sessionRole={sessionRole}
           />
         )}
       </div>
@@ -1128,11 +1129,12 @@ function AdminHomePanel({
     { tab: 'management_members', label: '팀원 관리', description: '팀원 추가·수정', icon: Users },
     { tab: 'management_categories', label: '업무 분류 관리', description: '대·소분류 편집', icon: Layers },
   ];
-  if (sessionRole === 'admin') {
+  if (sessionRole === 'admin' || sessionRole === 'director') {
     items.push({ tab: 'management_admin_settings', label: '관리자 설정', description: '비밀번호 등', icon: KeyRound });
   }
   if (sessionRole === 'master') {
     items.push({ tab: 'master', label: '마스터 관리', description: '팀·계정 전역', icon: Shield });
+    items.push({ tab: 'audit', label: '감사 로그', description: 'DB 변경 이력 (50개)', icon: FileText });
   }
 
   return (

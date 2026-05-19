@@ -45,6 +45,7 @@ declare global {
         teams: Array<{
           id: string;
           name: string;
+          department?: string | null;
           sortOrder: number;
           adminLoginId: string;
           passwordPlain?: string | null;
@@ -57,6 +58,8 @@ declare global {
       changeAdminPasswordSelf: (params: ChangeAdminPasswordSelfParams) => Promise<void>;
       getMembersByTeam: (teamId: string) => Promise<TeamMember[]>;
       getLogsByTeam: (teamId: string) => Promise<WorkLog[]>;
+      onDbChange: (callback: (payload: string) => void) => () => void;
+      getAuditLogs: (limit?: number) => Promise<import('@/types/workLog').AuditLog[]>;
     };
   }
 }
@@ -64,7 +67,7 @@ declare global {
 export class IpcDatabaseAdapter implements IDatabaseAdapter {
   private cachedConfig: DatabaseConfig = {
     isConnected: false,
-    adapterType: 'sqlite',
+    adapterType: 'postgresql',
   };
 
   private get api() {
@@ -122,6 +125,7 @@ export class IpcDatabaseAdapter implements IDatabaseAdapter {
     teams: Array<{
       id: string;
       name: string;
+      department?: string | null;
       sortOrder: number;
       adminLoginId: string;
       passwordPlain?: string | null;
@@ -232,6 +236,10 @@ export class IpcDatabaseAdapter implements IDatabaseAdapter {
     return this.ipc(() => this.api.setSetting(key, value));
   }
 
+  async getAuditLogs(limit?: number): Promise<import('@/types/workLog').AuditLog[]> {
+    return this.ipc(() => this.api.getAuditLogs(limit));
+  }
+
   async clearAllData(): Promise<void> {
     return this.ipc(() => this.api.clearAllData());
   }
@@ -242,5 +250,11 @@ export class IpcDatabaseAdapter implements IDatabaseAdapter {
 
   async importData(data: { teams?: WorkTeam[]; members: TeamMember[]; logs: WorkLog[]; categories: string[] }): Promise<void> {
     return this.ipc(() => this.api.importData(data));
+  }
+
+  onDbChange(callback: (payload: string) => void): (() => void) | void {
+    if (this.api.onDbChange) {
+      return this.api.onDbChange(callback);
+    }
   }
 }

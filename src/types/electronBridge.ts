@@ -60,6 +60,27 @@ export interface ElectronPreloadApi {
   clearAllData: () => Promise<unknown>;
   exportData: () => Promise<unknown>;
   importData: (data: object) => Promise<unknown>;
+  pgGetSettingsForUi: () => Promise<{
+    host: string;
+    port: number;
+    user: string;
+    database: string;
+    hasPassword: boolean;
+  }>;
+  pgTestConnection: (payload: {
+    host: string;
+    port: number;
+    user: string;
+    database: string;
+    password?: string;
+  }) => Promise<{ ok: true } | { ok: false; errorMessage: string }>;
+  pgSaveAndReinit: (payload: {
+    host: string;
+    port: number;
+    user: string;
+    database: string;
+    password?: string;
+  }) => Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
 declare global {

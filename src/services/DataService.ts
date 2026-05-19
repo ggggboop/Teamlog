@@ -48,6 +48,7 @@ export interface IDataService {
     teams: Array<{
       id: string;
       name: string;
+      department?: string | null;
       sortOrder: number;
       adminLoginId: string;
       passwordPlain?: string | null;
@@ -98,6 +99,10 @@ export interface IDataService {
   // Settings (일일 총 업무시간 등)
   getSetting(key: string): Promise<string | null>;
   setSetting(key: string, value: string): Promise<void>;
+
+  getAuditLogs?(limit?: number): Promise<import('../types/workLog').AuditLog[]>;
+
+  onDbChange?(callback: (payload: string) => void): (() => void) | void;
 }
 
 class DataServiceImpl implements IDataService {
@@ -154,6 +159,7 @@ class DataServiceImpl implements IDataService {
     teams: Array<{
       id: string;
       name: string;
+      department?: string | null;
       sortOrder: number;
       adminLoginId: string;
       passwordPlain?: string | null;
@@ -299,6 +305,19 @@ class DataServiceImpl implements IDataService {
   async setSetting(key: string, value: string): Promise<void> {
     await this.adapter.setSetting(key, value);
   }
+
+  async getAuditLogs(limit?: number): Promise<import('../types/workLog').AuditLog[]> {
+    if (this.adapter.getAuditLogs) {
+      return this.adapter.getAuditLogs(limit);
+    }
+    return [];
+  }
+
+  onDbChange(callback: (payload: string) => void): (() => void) | void {
+    if (this.adapter.onDbChange) {
+      return this.adapter.onDbChange(callback);
+    }
+  }
 }
 
 // 환경에 따라 어댑터 선택: Electron → IPC(SQLite), 웹 → In-Memory
@@ -311,7 +330,10 @@ let initPromise: Promise<void> | null = null;
 
 export const initializeDataService = (): Promise<void> => {
   if (!initPromise) {
-    initPromise = dataService.initialize();
+    initPromise = dataService.initialize().catch((err) => {
+      initPromise = null;
+      throw err;
+    });
   }
   return initPromise;
 };

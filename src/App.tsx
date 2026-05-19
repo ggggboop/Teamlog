@@ -53,8 +53,16 @@ function ElectronVersionGate({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
-// Electron(file://)에서는 HashRouter 사용 - BrowserRouter는 pathname을 파일 경로로 잘못 인식함
-const Router = typeof window !== "undefined" && window.electron ? HashRouter : BrowserRouter;
+/** Electron은 file:// 로 열림. BrowserRouter는 이 때 pathname이 파일 경로로 잡혀 라우팅이 깨지고 새로고침(Ctrl+R) 시 빈 화면이 나올 수 있음 */
+function FileOrElectronRouter({ children }: { children: ReactNode }) {
+  const useHash =
+    typeof window !== "undefined" &&
+    (window.location.protocol === "file:" || typeof window.electron !== "undefined");
+  if (useHash) {
+    return <HashRouter>{children}</HashRouter>;
+  }
+  return <BrowserRouter>{children}</BrowserRouter>;
+}
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
@@ -62,12 +70,12 @@ const App = () => (
       <Toaster />
       <Sonner />
       <ElectronVersionGate>
-        <Router>
+        <FileOrElectronRouter>
           <Routes>
             <Route path="/" element={<Index />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
-        </Router>
+        </FileOrElectronRouter>
       </ElectronVersionGate>
     </TooltipProvider>
   </QueryClientProvider>

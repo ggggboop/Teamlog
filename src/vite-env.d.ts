@@ -15,7 +15,12 @@ interface ElectronAPI {
     minRequiredVersion: string | null;
     blocked: boolean;
   }>;
-  getConfig: () => Promise<{ dbPath?: string; isConnected: boolean; adapterType: string }>;
+  getConfig: () => Promise<{
+    dbPath?: string;
+    pg?: { host: string; port: number; user: string; database: string };
+    isConnected: boolean;
+    adapterType: string;
+  }>;
   getAllMembers: () => Promise<import('@/types/workLog').TeamMember[]>;
   getMemberById: (id: string) => Promise<import('@/types/workLog').TeamMember | null>;
   insertMember: (member: { name: string; role: string; avatar?: string }) => Promise<import('@/types/workLog').TeamMember>;
@@ -36,6 +41,27 @@ interface ElectronAPI {
   clearAllData: () => Promise<void>;
   exportData: () => Promise<{ members: import('@/types/workLog').TeamMember[]; logs: import('@/types/workLog').WorkLog[]; categories: string[] }>;
   importData: (data: object) => Promise<void>;
+  pgGetSettingsForUi: () => Promise<{
+    host: string;
+    port: number;
+    user: string;
+    database: string;
+    hasPassword: boolean;
+  }>;
+  pgTestConnection: (payload: {
+    host: string;
+    port: number;
+    user: string;
+    database: string;
+    password?: string;
+  }) => Promise<{ ok: true } | { ok: false; errorMessage: string }>;
+  pgSaveAndReinit: (payload: {
+    host: string;
+    port: number;
+    user: string;
+    database: string;
+    password?: string;
+  }) => Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
 declare global {

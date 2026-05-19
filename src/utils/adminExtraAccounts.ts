@@ -3,10 +3,11 @@ import type { AdminExtraAccountPayload } from '@/constants/globalTeamAdmin';
 
 export type StoredAdminExtra = { loginId: string; passwordHash: string };
 
-export function parseStoredAdminExtras(json: string | null | undefined): StoredAdminExtra[] {
-  if (!json?.trim()) return [];
+export function parseStoredAdminExtras(json: string | null | undefined | unknown): StoredAdminExtra[] {
+  if (!json) return [];
+  if (typeof json === 'string' && !json.trim()) return [];
   try {
-    const arr = JSON.parse(json) as unknown;
+    const arr = typeof json === 'string' ? JSON.parse(json) : json;
     if (!Array.isArray(arr)) return [];
     const out: StoredAdminExtra[] = [];
     for (const x of arr) {
@@ -35,7 +36,7 @@ export function serializeAdminExtras(stored: StoredAdminExtra[]): string {
 
 /** 저장 시: 기존 해시 유지(비번 비움) 또는 새 해시 */
 export async function mergeAdminExtrasOnSave(
-  oldJson: string | null | undefined,
+  oldJson: string | null | undefined | unknown,
   payloadRows: AdminExtraAccountPayload[],
   hashPassword: (pw: string) => Promise<string> | string
 ): Promise<StoredAdminExtra[]> {

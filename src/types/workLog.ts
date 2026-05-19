@@ -9,6 +9,8 @@ export interface WorkTeam {
   id: string;
   name: string;
   sortOrder: number;
+  /** 부서명 (옵션) */
+  department?: string | null;
   /** 팀 관리자 로그인 ID (DB에 저장) */
   adminLoginId?: string | null;
   /** 비밀번호가 설정되어 있는지 (해시는 클라이언트에 비공개) */
@@ -63,6 +65,16 @@ export interface WorkLog {
 export type WorkCategory = string; // 레거시 호환: 이제 문자열(display name)
 
 export type WorkIndicatorType = 'R&R/루틴업무' | '현안대응' | '품질고도화 과제' | '조직운영관리' | '기타/행정';
+
+export interface AuditLog {
+  id: string;
+  tableName: string;
+  operation: string;
+  recordId: string;
+  oldData: any | null;
+  newData: any | null;
+  changedAt: string;
+}
 
 export const WORK_INDICATOR_OPTIONS: WorkIndicatorType[] = ['R&R/루틴업무', '현안대응', '품질고도화 과제', '조직운영관리', '기타/행정'];
 

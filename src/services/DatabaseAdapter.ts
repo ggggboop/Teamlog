@@ -13,12 +13,9 @@
  * - 미리보기/UX 테스트 전용
  * - 동시성 고려 안 함
  * 
- * [Electron 환경 (전환 예정)]
- * - SQLite 파일 기반 저장 (better-sqlite3)
- * - 프로그램 내 DB 경로 선택 UI
- * - 지정 경로에 DB 없으면 자동 생성
- * - WAL 모드로 동시 접근 지원
- * - schema.sql로 DB 초기화
+ * [Electron 환경]
+ * - PostgreSQL (pg Pool), 메인 프로세스
+ * - userData/settings.json 의 pg 또는 PG* 환경 변수
  */
 
 import { TeamMember, WorkLog, Category, WorkTeam } from '@/types/workLog';
@@ -33,13 +30,23 @@ export interface SaveLogsBatchPayload {
   newLogs: Omit<WorkLog, 'id' | 'createdAt' | 'updatedAt'>[];
 }
 
+/** PostgreSQL 연결 요약 (Electron 메인 — 비밀번호 제외) */
+export interface PgConnectionInfo {
+  host: string;
+  port: number;
+  user: string;
+  database: string;
+}
+
 export interface DatabaseConfig {
-  /** DB 파일 경로 (Electron에서만 사용) */
+  /** DB 파일 경로 (Electron SQLite 레거시; PostgreSQL에서는 미사용) */
   dbPath?: string;
+  /** PostgreSQL 연결 요약 (비밀번호 비포함) */
+  pg?: PgConnectionInfo;
   /** 연결 성공 여부 */
   isConnected: boolean;
   /** 현재 어댑터 타입 */
-  adapterType: 'indexeddb' | 'sqlite';
+  adapterType: 'indexeddb' | 'sqlite' | 'postgresql';
 }
 
 export interface IDatabaseAdapter {
@@ -67,6 +74,7 @@ export interface IDatabaseAdapter {
     teams: Array<{
       id: string;
       name: string;
+      department?: string | null;
       sortOrder: number;
       adminLoginId: string;
       passwordPlain?: string | null;
@@ -115,6 +123,12 @@ export interface IDatabaseAdapter {
   setSetting(key: string, value: string): Promise<void>;
 
   // ==================== Data Management ====================
+  /** DB 갱신 시 실시간 이벤트 구독 (PostgreSQL LISTEN/NOTIFY 활용). 구독 해제 함수 반환 */
+  onDbChange?(callback: (payload: string) => void): () => void;
+
+  /** 감사 로그 조회 (최신순) */
+  getAuditLogs?(limit?: number): Promise<import('../types/workLog').AuditLog[]>;
+
   /** 모든 데이터 삭제 (초기화) */
   clearAllData(): Promise<void>;
   

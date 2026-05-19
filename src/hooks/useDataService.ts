@@ -112,6 +112,26 @@ export function useDataService(selectedTeamId: string | null) {
     loadData();
   }, [refreshData]);
 
+  useEffect(() => {
+    let timeout: NodeJS.Timeout | null = null;
+    const handleDbChange = (payload: string) => {
+      console.log('[DB Sync] 테이블 변경 감지:', payload);
+      if (timeout) clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        refreshData();
+      }, 500); // 500ms 디바운스
+    };
+
+    let unsub: (() => void) | void = undefined;
+    if (dataService.onDbChange) {
+      unsub = dataService.onDbChange(handleDbChange);
+    }
+    return () => {
+      if (timeout) clearTimeout(timeout);
+      if (unsub) unsub();
+    };
+  }, [refreshData]);
+
   const addTeam = useCallback(async (name: string) => {
     const t = await dataService.addTeam(name);
     setTeams(prev => [...prev, t].sort((a, b) => a.sortOrder - b.sortOrder));

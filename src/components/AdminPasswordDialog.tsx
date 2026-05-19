@@ -75,15 +75,15 @@ export function AdminPasswordDialog({
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent className="sm:max-w-md rounded-2xl">
         <DialogHeader>
-          <DialogTitle>팀 관리자 로그인</DialogTitle>
+          <DialogTitle>Manager 로그인</DialogTitle>
           <DialogDescription>
-            {teamName ? `「${teamName}」` : '선택한 팀'}의 팀 관리자 계정으로 로그인하세요. 마스터 계정이면 이 단계를 건너뛰고 바로
+            {teamName ? `「${teamName}」` : '선택한 팀'}의 Manager 계정으로 로그인하세요. Master 계정이면 이 단계를 건너뛰고 바로
             입장합니다.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="text-sm text-muted-foreground">관리자 ID</label>
+            <label className="text-sm text-muted-foreground">Manager ID</label>
             <Input
               value={loginId}
               onChange={(e) => {

@@ -40,6 +40,7 @@ const electronAPI = {
   }) => ipcRenderer.invoke('db:changeAdminPasswordSelf', params),
   getMembersByTeam: (teamId: string) => ipcRenderer.invoke('db:getMembersByTeam', teamId),
   getLogsByTeam: (teamId: string) => ipcRenderer.invoke('db:getLogsByTeam', teamId),
+  getAuditLogs: (limit?: number) => ipcRenderer.invoke('db:getAuditLogs', limit),
   getMemberById: (id: string) => ipcRenderer.invoke('db:getMemberById', id),
   insertMember: (member: { name: string; role: string; avatar?: string; teamId: string }) =>
     ipcRenderer.invoke('db:insertMember', member),
@@ -64,6 +65,28 @@ const electronAPI = {
   clearAllData: () => ipcRenderer.invoke('db:clearAllData'),
   exportData: () => ipcRenderer.invoke('db:exportData'),
   importData: (data: object) => ipcRenderer.invoke('db:importData', data),
+  pgGetSettingsForUi: () => ipcRenderer.invoke('pg:getSettingsForUi'),
+  pgTestConnection: (payload: {
+    host: string;
+    port: number;
+    user: string;
+    database: string;
+    password?: string;
+  }) => ipcRenderer.invoke('pg:testConnection', payload),
+  pgSaveAndReinit: (payload: {
+    host: string;
+    port: number;
+    user: string;
+    database: string;
+    password?: string;
+  }) => ipcRenderer.invoke('pg:saveAndReinit', payload),
+  onDbChange: (callback: (payload: string) => void) => {
+    const handler = (_e: any, payload: string) => callback(payload);
+    ipcRenderer.on('db:changed', handler);
+    return () => {
+      ipcRenderer.off('db:changed', handler);
+    };
+  },
 };
 
 contextBridge.exposeInMainWorld('electron', electronAPI);

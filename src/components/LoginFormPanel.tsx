@@ -46,11 +46,7 @@ export function LoginFormPanel({
         className
       )}
     >
-      {embedded ? (
-        <p className="text-base leading-relaxed text-slate-600">
-          DB 경로 확인 후 사번으로 입장합니다
-        </p>
-      ) : (
+      {!embedded && (
         <div className="flex items-center gap-3">
           <div
             className={cn(
@@ -70,9 +66,6 @@ export function LoginFormPanel({
             <h2 className="text-xl font-semibold tracking-tight" style={{ color: 'var(--sl-text-main, #334155)' }}>
               업무 기록
             </h2>
-            <p className="text-base" style={{ color: 'var(--sl-text-muted, #94a3b8)' }}>
-              DB 경로 확인 후 사번으로 입장합니다
-            </p>
           </div>
         </div>
       )}
@@ -132,7 +125,7 @@ export function LoginFormPanel({
 
       {!embedded && (
         <p className="text-xs text-center" style={{ color: 'var(--sl-text-muted, #94a3b8)' }}>
-          일반 팀원은 사번만으로 작성 화면으로 이동합니다. 팀·전체·마스터 관리자는 비밀번호가 필요합니다.
+          일반 팀원은 사번만으로 작성 화면으로 이동합니다. Manager, Director, Master는 비밀번호가 필요합니다.
         </p>
       )}
     </div>

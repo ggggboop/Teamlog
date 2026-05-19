@@ -30,7 +30,8 @@ await esbuild.build({
   format: 'cjs',
   target: 'node18',
   bundle: true,
-  external: ['electron', 'better-sqlite3'],
+  /** `pg`는 번들에 포함 — electron-builder가 dist만 패키징할 때 node_modules 누락으로 런타임 require 실패하는 것을 방지 */
+  external: ['electron'],
   sourcemap: false,
   define: {
     __TEAMLOG_PACKAGE_VERSION__: JSON.stringify(packageVersion),
